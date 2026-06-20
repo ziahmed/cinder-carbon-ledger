@@ -1,43 +1,62 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, ReferenceLine, Tooltip,
+  BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, ReferenceLine,
+  Tooltip, PieChart, Pie,
 } from "recharts";
 import {
-  Car, Home, UtensilsCrossed, ShoppingBag, Plus, Trash2, Target,
-  BarChart3, Lightbulb, Settings, Check, Flame, ArrowRight, Leaf,
+  Flame, LayoutDashboard, ReceiptText, Lightbulb, Settings as SettingsIcon,
+  BookOpen, Plus, Trash2, X, ArrowUpRight, ArrowDownRight, Plane, Car, Zap,
+  UtensilsCrossed, ShoppingBag, Shapes, Download, Search, Check, ArrowRight,
+  Target, TrendingUp, Info, Sparkles,
 } from "lucide-react";
 
-/* ---------------------------------------------------------------- design tokens */
-const C = {
-  bg: "#EAEFEC", ink: "#16221E", sub: "#5C6B65", line: "#D6DEDA",
-  surface: "#FFFFFF", brand: "#14655E", brandSoft: "#DBEAE6",
-  good: "#2E9E8F", warn: "#C2492F", warnSoft: "#F4DFD9", amber: "#C9892F",
-};
-const FONT_SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
-const FONT_SERIF = 'ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif';
+/* ============================================================ storage
+   Works in two environments: artifact runtime (window.storage) and a normal
+   browser deployment (localStorage). Prefer window.storage when present. */
+const KEYS = { entries: "cinder:entries:v2", settings: "cinder:settings:v2", entered: "cinder:entered:v2" };
+async function loadKey(key, fallback) {
+  try {
+    if (typeof window !== "undefined" && window.storage) {
+      const r = await window.storage.get(key);
+      return r && r.value != null ? JSON.parse(r.value) : fallback;
+    }
+    const raw = window.localStorage.getItem(key);
+    return raw != null ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+async function saveKey(key, val) {
+  try {
+    if (typeof window !== "undefined" && window.storage) { await window.storage.set(key, JSON.stringify(val)); return; }
+    window.localStorage.setItem(key, JSON.stringify(val));
+  } catch { /* keep in memory */ }
+}
 
-/* ---------------------------------------------------------------- emission factors (kg CO2e per unit) */
+/* ============================================================ domain model */
 const CATS = {
-  transport: { label: "Transport", color: "#14655E", icon: Car, unit: "km" },
-  energy:    { label: "Home energy", color: "#3E7CB1", icon: Home, unit: "kWh" },
+  travel:    { label: "Travel", color: "#0F766E", icon: Plane, unit: "km" },
+  energy:    { label: "Energy", color: "#3B6EA5", icon: Zap, unit: "kWh" },
   food:      { label: "Food", color: "#C9892F", icon: UtensilsCrossed, unit: "meal" },
-  goods:     { label: "Things", color: "#A65D57", icon: ShoppingBag, unit: "item" },
+  purchases: { label: "Purchases", color: "#A65D57", icon: ShoppingBag, unit: "item" },
+  other:     { label: "Other", color: "#64748B", icon: Shapes, unit: "unit" },
 };
+const CAT_ORDER = ["travel", "energy", "food", "purchases", "other"];
+
+// kg CO2e per unit. Sources: UK DEFRA 2024 conversion factors, US EPA, Our World in Data.
 const FACTORS = {
-  transport: {
-    car_petrol: { label: "Car · petrol", f: 0.192 },
-    car_diesel: { label: "Car · diesel", f: 0.171 },
-    car_ev:     { label: "Car · electric", f: 0.053 },
-    motorbike:  { label: "Motorbike", f: 0.103 },
-    bus:        { label: "Bus", f: 0.097 },
-    train:      { label: "Train / MRT", f: 0.035 },
-    flight_sh:  { label: "Flight · short-haul", f: 0.246 },
-    flight_lg:  { label: "Flight · long-haul", f: 0.180 },
-    walk_cycle: { label: "Walk / cycle", f: 0 },
+  travel: {
+    flight_short: { label: "Flight · short-haul", f: 0.246 },
+    flight_long:  { label: "Flight · long-haul", f: 0.180 },
+    car_petrol:   { label: "Car · petrol", f: 0.192 },
+    car_diesel:   { label: "Car · diesel", f: 0.171 },
+    car_ev:       { label: "Car · electric", f: 0.053 },
+    motorbike:    { label: "Motorbike", f: 0.103 },
+    bus:          { label: "Bus", f: 0.097 },
+    train:        { label: "Train / metro", f: 0.035 },
+    walk_cycle:   { label: "Walk / cycle", f: 0 },
   },
   energy: {
-    electricity: { label: "Electricity", f: 0.41 },
-    natural_gas: { label: "Natural gas", f: 0.184 },
+    electricity:  { label: "Electricity", f: 0.41 },
+    natural_gas:  { label: "Natural gas", f: 0.184 },
   },
   food: {
     beef:       { label: "Beef meal", f: 6.6 },
@@ -50,671 +69,1044 @@ const FACTORS = {
     vegetarian: { label: "Vegetarian meal", f: 0.5 },
     vegan:      { label: "Vegan meal", f: 0.4 },
   },
-  goods: {
-    tshirt:     { label: "T-shirt", f: 7 },
-    jeans:      { label: "Jeans", f: 25 },
-    shoes:      { label: "Pair of shoes", f: 14 },
-    elec_small: { label: "Small electronics", f: 50 },
-    elec_large: { label: "Large appliance", f: 300 },
-    book:       { label: "Book", f: 1 },
+  purchases: {
+    general_spend: { label: "General purchase", f: 0.45, unit: "$" },
+    tshirt:        { label: "T-shirt", f: 7 },
+    jeans:         { label: "Jeans", f: 25 },
+    shoes:         { label: "Pair of shoes", f: 14 },
+    elec_small:    { label: "Small electronics", f: 50 },
+    elec_large:    { label: "Large appliance", f: 300 },
+    book:          { label: "Book", f: 1 },
+  },
+  other: {
+    custom: { label: "Custom entry", f: 1, unit: "kg CO₂e" },
   },
 };
-const SUSTAINABLE_DAILY = 5.5; // ~2 t CO2e/yr personal target
+const unitOf = (cat, type) => FACTORS[cat]?.[type]?.unit || CATS[cat].unit;
+const factorOf = (cat, type) => FACTORS[cat]?.[type]?.f ?? 0;
 
-/* ---------------------------------------------------------------- helpers */
-const todayStr = () => new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD local
-const dayKeyToDate = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
-const fmt = (kg) => (kg >= 100 ? Math.round(kg).toLocaleString() : kg.toFixed(1));
-const fmtYr = (kg) => (kg >= 1000 ? (kg / 1000).toFixed(1) + " t" : Math.round(kg).toLocaleString() + " kg");
+/* ============================================================ helpers */
+const rid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const ymd = (d) => d.toLocaleDateString("en-CA");
+const parseYMD = (s) => { const [y, m, dd] = s.split("-").map(Number); return new Date(y, m - 1, dd); };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 
-function lastNDayStrings(n) {
+const mkEntry = (cat, type, amount, date) => ({ id: rid(), cat, type, amount: +amount, date, co2: +(factorOf(cat, type) * amount).toFixed(3) });
+
+function fmt(kg, units = "kg") {
+  if (units === "t") return (kg / 1000).toFixed(kg >= 10000 ? 1 : 2);
+  if (kg >= 100) return Math.round(kg).toLocaleString();
+  if (kg >= 10) return kg.toFixed(0);
+  return kg.toFixed(1);
+}
+const unitLabel = (units = "kg") => (units === "t" ? "t CO₂e" : "kg CO₂e");
+
+const RANGES = [
+  { key: "7d", label: "7 days" },
+  { key: "30d", label: "30 days" },
+  { key: "month", label: "This month" },
+  { key: "year", label: "This year" },
+  { key: "all", label: "All time" },
+];
+function getRange(key, entries) {
+  const now = new Date();
+  const today = startOfDay(now);
+  const end = addDays(today, 1);
+  let start, prevStart = null, prevEnd = null, bucket = "day", label = "";
+  if (key === "7d") { start = addDays(today, -6); prevEnd = start; prevStart = addDays(start, -7); label = "the last 7 days"; }
+  else if (key === "30d") { start = addDays(today, -29); prevEnd = start; prevStart = addDays(start, -30); label = "the last 30 days"; }
+  else if (key === "month") { start = new Date(now.getFullYear(), now.getMonth(), 1); prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1); prevEnd = start; label = "this month"; }
+  else if (key === "year") { start = new Date(now.getFullYear(), 0, 1); prevStart = new Date(now.getFullYear() - 1, 0, 1); prevEnd = start; bucket = "month"; label = "this year"; }
+  else {
+    const earliest = entries.length ? entries.reduce((a, e) => (e.date < a ? e.date : a), entries[0].date) : ymd(today);
+    start = startOfDay(parseYMD(earliest)); bucket = "month"; label = "all time";
+  }
+  return { start, end, prevStart, prevEnd, bucket, label, key };
+}
+const inRange = (e, start, end) => { const t = parseYMD(e.date).getTime(); return t >= start.getTime() && t < end.getTime(); };
+
+function buildSeries(entries, r) {
   const out = [];
-  const base = new Date();
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(base); d.setDate(base.getDate() - i);
-    out.push(d.toLocaleDateString("en-CA"));
+  if (r.bucket === "day") {
+    for (let d = new Date(r.start); d < r.end; d = addDays(d, 1)) {
+      const key = ymd(d);
+      const total = entries.filter((e) => e.date === key).reduce((s, e) => s + e.co2, 0);
+      out.push({ label: d.toLocaleDateString("en-US", { day: "numeric", month: r.key === "7d" ? "short" : undefined }), total: +total.toFixed(2), date: key });
+    }
+  } else {
+    const first = new Date(r.start.getFullYear(), r.start.getMonth(), 1);
+    for (let d = first; d < r.end; d = new Date(d.getFullYear(), d.getMonth() + 1, 1)) {
+      const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+      const total = entries.filter((e) => { const t = parseYMD(e.date); return t >= d && t < mEnd; }).reduce((s, e) => s + e.co2, 0);
+      out.push({ label: d.toLocaleDateString("en-US", { month: "short" }), total: +total.toFixed(2) });
+    }
   }
   return out;
 }
-function entryCO2(e) { return (FACTORS[e.cat]?.[e.type]?.f ?? 0) * e.amount; }
-
-/* ---------------------------------------------------------------- storage (browser localStorage, with safe fallback) */
-const KEYS = { entries: "cinder:entries:v1", settings: "cinder:settings:v1" };
-async function loadKey(key, fallback) {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw != null ? JSON.parse(raw) : fallback;
-  } catch { return fallback; }
+function catTotals(entries) {
+  const t = {};
+  for (const e of entries) t[e.cat] = (t[e.cat] || 0) + e.co2;
+  return t;
 }
-async function saveKey(key, val) {
-  try { window.localStorage.setItem(key, JSON.stringify(val)); } catch { /* storage unavailable; keep in memory */ }
+function typeTotals(entries) {
+  const t = {};
+  for (const e of entries) { const k = e.cat + ":" + e.type; (t[k] ||= { cat: e.cat, type: e.type, co2: 0, count: 0 }); t[k].co2 += e.co2; t[k].count++; }
+  return Object.values(t).sort((a, b) => b.co2 - a.co2);
 }
 
-/* ---------------------------------------------------------------- insights engine */
-function buildInsights(entries, target) {
-  const recentStrs = new Set(lastNDayStrings(7));
-  const wk = entries.filter((e) => recentStrs.has(e.date));
-  if (wk.length === 0) return { ready: false, list: [], wins: [], weekTotal: 0, dailyAvg: 0 };
-
-  const byType = {};
-  let weekTotal = 0;
-  for (const e of wk) {
-    const co2 = entryCO2(e);
-    weekTotal += co2;
-    const t = (byType[e.type] ||= { co2: 0, amount: 0, count: 0, cat: e.cat });
-    t.co2 += co2; t.amount += e.amount; t.count += 1;
+function sampleEntries() {
+  const out = [];
+  const today = startOfDay(new Date());
+  const meals = ["poultry", "vegetarian", "beef", "vegan", "pork", "fish", "vegetarian"];
+  for (let i = 0; i < 35; i++) {
+    const date = ymd(addDays(today, -i));
+    out.push(mkEntry("energy", "electricity", 6 + (i % 5), date));
+    out.push(mkEntry("food", meals[i % meals.length], 1, date));
+    if (i % 2 === 0) out.push(mkEntry("food", "vegetarian", 1, date));
+    const dow = addDays(today, -i).getDay();
+    if (dow >= 1 && dow <= 5) out.push(mkEntry("travel", "car_petrol", 18 + (i % 6), date));
+    else out.push(mkEntry("travel", "train", 12, date));
   }
-  const list = [];
-
-  // Transport — car
-  const carCo2 = (byType.car_petrol?.co2 || 0) + (byType.car_diesel?.co2 || 0);
-  const carKm = (byType.car_petrol?.amount || 0) + (byType.car_diesel?.amount || 0);
-  if (carCo2 > 0.5) {
-    const save = carCo2 * 0.5 * 52;
-    list.push({
-      cat: "transport",
-      title: "Shift short car trips to transit or cycling",
-      body: `You logged ${Math.round(carKm)} km by car this week (${fmt(carCo2)} kg CO₂e). Moving about half onto the MRT, bus, or a bike would avoid roughly ${fmtYr(save)} CO₂e a year.`,
-      saving: save,
-    });
-  }
-  // Transport — flights
-  const flyCo2 = (byType.flight_sh?.co2 || 0) + (byType.flight_lg?.co2 || 0);
-  if (flyCo2 > 5) {
-    list.push({
-      cat: "transport",
-      title: "Flights dominate — make each one count",
-      body: `Air travel added ${fmt(flyCo2)} kg this week. One fewer return short-haul trip a year (~400 kg) often beats every other change combined; consider rail or combining trips.`,
-      saving: 400,
-    });
-  }
-  // Food — red meat
-  const redCo2 = (byType.beef?.co2 || 0) + (byType.lamb?.co2 || 0);
-  const redCount = (byType.beef?.count || 0) + (byType.lamb?.count || 0);
-  if (redCount > 0) {
-    const avgRed = redCo2 / redCount;
-    const save = Math.max(0, (avgRed - FACTORS.food.poultry.f) * (redCount / 2) * 52);
-    list.push({
-      cat: "food",
-      title: "Swap half your red-meat meals",
-      body: `Your ${redCount} red-meat meal${redCount > 1 ? "s" : ""} added ${fmt(redCo2)} kg — the single biggest lever on a plate. Replacing half with chicken, fish, or beans saves about ${fmtYr(save)} CO₂e a year.`,
-      saving: save,
-    });
-  }
-  // Energy — electricity
-  if (byType.electricity && byType.electricity.co2 > 1) {
-    const save = byType.electricity.co2 * 0.15 * 52;
-    list.push({
-      cat: "energy",
-      title: "Trim cooling and standby load",
-      body: `Electricity was ${fmt(byType.electricity.co2)} kg this week. A 15% cut — a warmer aircon setpoint, LED lighting, and killing standby power — is about ${fmtYr(save)} CO₂e a year.`,
-      saving: save,
-    });
-  }
-  // Goods
-  const goodsCo2 = wk.filter((e) => e.cat === "goods").reduce((s, e) => s + entryCO2(e), 0);
-  if (goodsCo2 > 20) {
-    list.push({
-      cat: "goods",
-      title: "Buy less, keep things longer",
-      body: `New purchases added ${fmt(goodsCo2)} kg this week. Most of an item's footprint is in making it — repairing, buying second-hand, or simply delaying replacements cuts that at the source.`,
-      saving: goodsCo2 * 0.4 * 52,
-    });
-  }
-
-  list.sort((a, b) => b.saving - a.saving);
-
-  // Wins
-  const wins = [];
-  const greenKm = byType.walk_cycle?.amount || 0;
-  if (greenKm > 0) wins.push(`You covered ${Math.round(greenKm)} km on foot or by bike — about ${fmt(greenKm * FACTORS.transport.car_petrol.f)} kg CO₂e avoided versus driving.`);
-  const vegCount = (byType.vegan?.count || 0) + (byType.vegetarian?.count || 0);
-  if (vegCount > 0) wins.push(`${vegCount} plant-based meal${vegCount > 1 ? "s" : ""} logged — among the lowest-impact choices on the menu.`);
-  if (byType.train) wins.push(`${Math.round(byType.train.amount)} km by train, one of the cleanest ways to move.`);
-
-  return { ready: true, list, wins, weekTotal, dailyAvg: weekTotal / 7 };
+  out.push(mkEntry("travel", "flight_short", 1100, ymd(addDays(today, -20))));
+  out.push(mkEntry("purchases", "general_spend", 60, ymd(addDays(today, -8))));
+  out.push(mkEntry("purchases", "tshirt", 2, ymd(addDays(today, -14))));
+  out.push(mkEntry("purchases", "elec_small", 1, ymd(addDays(today, -3))));
+  return out;
 }
 
-/* ---------------------------------------------------------------- small UI atoms */
-function Card({ children, style }) {
+function exportCSV(entries) {
+  const head = ["Date", "Category", "Activity", "Amount", "Unit", "CO2e_kg"];
+  const rows = entries.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).map((e) => [
+    e.date, CATS[e.cat].label, FACTORS[e.cat][e.type].label, e.amount, unitOf(e.cat, e.type), e.co2.toFixed(2),
+  ]);
+  const csv = [head, ...rows].map((r) => r.map((x) => `"${String(x).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "cinder-activities.csv"; a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ============================================================ styles */
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+.cinder *{box-sizing:border-box;}
+.cinder{
+  --ink:#111827; --ink-2:#374151; --sub:#6B7280; --line:#E6E9E7; --line-2:#EEF1EF;
+  --bg:#F4F6F4; --surface:#FFFFFF; --brand:#0F766E; --brand-2:#0E6B63; --brand-soft:#E2F0ED;
+  --good:#15803D; --warn:#C2410C; --danger:#B91C1C; --amber:#C9892F;
+  font-family:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  color:var(--ink); background:var(--bg); min-height:100vh; line-height:1.45;
+  font-variant-numeric:tabular-nums;
+}
+.wrap{max-width:1000px;margin:0 auto;padding:0 18px;}
+.num{font-variant-numeric:tabular-nums;letter-spacing:-0.01em;}
+
+/* header + nav */
+.hdr{display:flex;align-items:center;justify-content:space-between;padding:18px 0 14px;}
+.brand{display:flex;align-items:center;gap:10px;cursor:pointer;}
+.mark{width:34px;height:34px;border-radius:9px;background:var(--brand);display:grid;place-items:center;flex-shrink:0;}
+.brand h1{font-size:19px;font-weight:700;letter-spacing:-0.02em;margin:0;line-height:1;}
+.brand p{font-size:11px;color:var(--sub);margin:2px 0 0;}
+.tabs{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:5px;}
+.tab{display:flex;align-items:center;gap:7px;padding:8px 12px;border-radius:8px;border:none;background:transparent;
+  color:var(--sub);font-weight:500;font-size:13.5px;cursor:pointer;font-family:inherit;transition:background .15s,color .15s;white-space:nowrap;}
+.tab:hover{color:var(--ink);}
+.tab.active{background:var(--brand);color:#fff;font-weight:600;}
+.tab .lbl{display:inline;}
+.tabwrap{position:sticky;top:8px;z-index:20;}
+
+/* cards */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;}
+.pad{padding:18px;}
+.eyebrow{font-size:11px;letter-spacing:0.13em;text-transform:uppercase;color:var(--sub);font-weight:600;}
+.grid{display:grid;gap:14px;}
+.cols-4{grid-template-columns:repeat(4,1fr);}
+.cols-2{grid-template-columns:1fr 1fr;}
+.split{display:grid;gap:14px;grid-template-columns:1.4fr 1fr;}
+
+/* buttons + inputs */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border-radius:10px;font-family:inherit;
+  font-size:13.5px;font-weight:600;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);padding:9px 14px;transition:filter .15s,background .15s;}
+.btn:hover{background:var(--line-2);}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff;}
+.btn.primary:hover{filter:brightness(1.06);background:var(--brand);}
+.btn.danger{color:var(--danger);border-color:#F1D6D3;background:#fff;}
+.btn.danger:hover{background:#FBEDEB;}
+.btn:disabled{opacity:.5;cursor:not-allowed;}
+.input,.select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);font-size:14px;
+  font-family:inherit;color:var(--ink);background:var(--surface);outline:none;}
+.input:focus,.select:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft);}
+.lbl{display:block;font-size:12px;font-weight:600;color:var(--sub);margin-bottom:6px;}
+.seg{display:inline-flex;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px;}
+.seg button{border:none;background:transparent;padding:6px 11px;border-radius:7px;font-size:12.5px;font-weight:600;color:var(--sub);cursor:pointer;font-family:inherit;}
+.seg button.on{background:var(--ink);color:#fff;}
+
+/* stat cards */
+.stat .k{font-size:11.5px;color:var(--sub);font-weight:500;}
+.stat .v{font-size:27px;font-weight:800;letter-spacing:-0.02em;margin-top:6px;line-height:1;}
+.stat .v small{font-size:13px;font-weight:600;color:var(--sub);margin-left:4px;letter-spacing:0;}
+.delta{display:inline-flex;align-items:center;gap:3px;font-size:12px;font-weight:700;margin-top:8px;}
+.delta.up{color:var(--warn);} .delta.down{color:var(--good);}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;margin-top:8px;}
+.dot{width:9px;height:9px;border-radius:3px;flex-shrink:0;}
+.minibar{height:7px;border-radius:5px;background:var(--bg);overflow:hidden;margin-top:10px;}
+.minibar > div{height:100%;border-radius:5px;}
+
+/* table / ledger */
+.ledger{width:100%;border-collapse:collapse;font-size:13.5px;}
+.ledger th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--sub);font-weight:600;padding:0 12px 10px;}
+.ledger td{padding:12px;border-top:1px solid var(--line-2);vertical-align:middle;}
+.ledger tr.row{cursor:pointer;}
+.ledger tr.row:hover td{background:var(--line-2);}
+.ledger .right{text-align:right;}
+.tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;}
+.icwrap{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;flex-shrink:0;}
+
+/* donut center */
+.donut{position:relative;}
+.donut .center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;}
+.donut .center b{font-size:24px;font-weight:800;letter-spacing:-0.02em;}
+.donut .center span{font-size:11px;color:var(--sub);}
+
+/* sheet / modal */
+.scrim{position:fixed;inset:0;background:rgba(17,24,39,.45);z-index:50;display:flex;justify-content:flex-end;}
+.sheet{background:var(--surface);width:440px;max-width:100%;height:100%;overflow-y:auto;padding:22px;animation:slidein .22s ease;}
+@keyframes slidein{from{transform:translateX(24px);opacity:.6;}to{transform:none;opacity:1;}}
+.sheet-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;}
+.iconbtn{border:none;background:transparent;cursor:pointer;color:var(--sub);padding:6px;border-radius:8px;display:grid;place-items:center;}
+.iconbtn:hover{background:var(--line-2);color:var(--ink);}
+
+/* landing */
+.hero{display:grid;grid-template-columns:1.1fr 1fr;gap:36px;align-items:center;padding:46px 0 30px;}
+.hero h2{font-size:46px;line-height:1.03;font-weight:800;letter-spacing:-0.03em;margin:0 0 16px;}
+.hero p.sub{font-size:17px;color:var(--ink-2);margin:0 0 24px;max-width:30em;}
+.cta-row{display:flex;gap:12px;flex-wrap:wrap;}
+.btn.lg{padding:13px 20px;font-size:15px;border-radius:12px;}
+.trust{font-size:12.5px;color:var(--sub);margin-top:20px;display:flex;gap:14px;flex-wrap:wrap;}
+.trust span{display:inline-flex;align-items:center;gap:6px;}
+.section{padding:34px 0;}
+.section h3{font-size:13px;letter-spacing:0.12em;text-transform:uppercase;color:var(--sub);font-weight:700;margin:0 0 20px;}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
+.step .n{font-size:12px;font-weight:800;color:var(--brand);letter-spacing:0.08em;}
+.step h4{margin:8px 0 6px;font-size:17px;font-weight:700;letter-spacing:-0.01em;}
+.step p{margin:0;color:var(--sub);font-size:14px;}
+.feat{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.badges{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;}
+.badge{font-size:12.5px;font-weight:600;color:var(--ink-2);background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:6px 12px;}
+.footer{border-top:1px solid var(--line);margin-top:24px;padding:24px 0 40px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;color:var(--sub);font-size:13px;}
+.footer a{color:var(--ink-2);text-decoration:none;cursor:pointer;}
+.footer a:hover{color:var(--brand);}
+
+/* preview mock for hero */
+.mock{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 20px 40px -28px rgba(15,118,110,.4);}
+.mock .row{display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:7px 0;border-top:1px solid var(--line-2);}
+.mock .row:first-of-type{border-top:none;}
+
+.empty{text-align:center;padding:46px 26px;}
+.empty .badge-ic{width:54px;height:54px;border-radius:14px;background:var(--brand-soft);display:grid;place-items:center;margin:0 auto 14px;}
+.empty h3{font-size:22px;font-weight:700;letter-spacing:-0.01em;margin:0 0 8px;}
+.empty p{color:var(--sub);font-size:14.5px;max-width:380px;margin:0 auto 20px;}
+
+a.link{color:var(--brand);font-weight:600;text-decoration:none;cursor:pointer;}
+.method td,.method th{padding:9px 10px;border-bottom:1px solid var(--line-2);font-size:13px;text-align:left;}
+.method th{color:var(--sub);font-size:11px;text-transform:uppercase;letter-spacing:0.07em;}
+
+@media (max-width:820px){
+  .split{grid-template-columns:1fr;}
+  .cols-4{grid-template-columns:1fr 1fr;}
+  .hero{grid-template-columns:1fr;gap:22px;padding:30px 0 10px;}
+  .hero h2{font-size:34px;}
+  .steps{grid-template-columns:1fr;}
+  .feat{grid-template-columns:1fr;}
+  .hero .mock{display:none;}
+}
+@media (max-width:640px){
+  .wrap{padding:0 12px 90px;}
+  .tabwrap{position:fixed;left:0;right:0;bottom:0;top:auto;z-index:40;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:linear-gradient(transparent,var(--bg) 30%);}
+  .tabs{justify-content:space-around;box-shadow:0 -2px 16px -8px rgba(0,0,0,.2);}
+  .tab .lbl{display:none;}
+  .tab{flex:1;justify-content:center;padding:10px 6px;}
+  .cols-4{grid-template-columns:1fr 1fr;}
+  .sheet{width:100%;}
+  .ledger .hide-sm{display:none;}
+}
+`;
+
+/* ============================================================ small components */
+const Card = ({ children, className = "", style }) => (
+  <div className={"card " + className} style={style}>{children}</div>
+);
+
+function StatCard({ k, value, units, delta, chip, bar }) {
   return (
-    <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, ...style }}>
-      {children}
-    </div>
+    <Card className="pad stat">
+      <div className="k">{k}</div>
+      {value !== undefined && (
+        <div className="v num">{value}{units && <small>{units}</small>}</div>
+      )}
+      {delta !== undefined && delta !== null && (
+        <div className={"delta " + (delta >= 0 ? "up" : "down")}>
+          {delta >= 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+          {Math.abs(delta)}% vs previous
+        </div>
+      )}
+      {chip}
+      {bar && (
+        <>
+          <div className="minibar"><div style={{ width: `${Math.min(100, bar.pct)}%`, background: bar.color }} /></div>
+          <div style={{ fontSize: 11.5, color: "var(--sub)", marginTop: 6 }}>{bar.note}</div>
+        </>
+      )}
+    </Card>
   );
 }
-function Eyebrow({ children }) {
-  return <div style={{ fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase", color: C.sub, fontWeight: 600 }}>{children}</div>;
+
+function CatTag({ cat }) {
+  const c = CATS[cat];
+  return <span className="tag" style={{ background: c.color + "1A", color: c.color }}><span className="dot" style={{ background: c.color }} />{c.label}</span>;
 }
 
-/* ================================================================ APP */
+/* ============================================================ APP */
 export default function App() {
   const [view, setView] = useState("dashboard");
+  const [entered, setEntered] = useState(true);
   const [entries, setEntries] = useState([]);
-  const [settings, setSettings] = useState({ name: "", target: 8 });
+  const [settings, setSettings] = useState({ name: "", units: "kg", monthlyBudget: 250, defaultRange: "month" });
+  const [range, setRange] = useState("month");
   const [loading, setLoading] = useState(true);
+  const [addOpen, setAddOpen] = useState(false);
+  const [detail, setDetail] = useState(null);
   const hydrated = useRef(false);
 
   useEffect(() => {
     (async () => {
-      const [e, s] = await Promise.all([
+      const [e, s, ent] = await Promise.all([
         loadKey(KEYS.entries, []),
-        loadKey(KEYS.settings, { name: "", target: 8 }),
+        loadKey(KEYS.settings, {}),
+        loadKey(KEYS.entered, false),
       ]);
+      const merged = { name: "", units: "kg", monthlyBudget: 250, defaultRange: "month", ...s };
       setEntries(Array.isArray(e) ? e : []);
-      setSettings({ name: "", target: 8, ...s });
+      setSettings(merged);
+      setRange(merged.defaultRange || "month");
+      setEntered(!!ent);
       setLoading(false);
       hydrated.current = true;
     })();
   }, []);
   useEffect(() => { if (hydrated.current) saveKey(KEYS.entries, entries); }, [entries]);
   useEffect(() => { if (hydrated.current) saveKey(KEYS.settings, settings); }, [settings]);
-
-  const target = settings.target || 8;
+  useEffect(() => { if (hydrated.current) saveKey(KEYS.entered, entered); }, [entered]);
 
   const addEntry = (cat, type, amount, date) => {
     const amt = parseFloat(amount);
-    if (!type || !amt || amt <= 0) return false;
-    setEntries((p) => [{ id: Date.now() + Math.random(), cat, type, amount: amt, date }, ...p]);
+    if (!type || !(amt > 0) || !date) return false;
+    setEntries((p) => [mkEntry(cat, type, amt, date), ...p]);
     return true;
   };
-  const deleteEntry = (id) => setEntries((p) => p.filter((e) => e.id !== id));
+  const deleteEntry = (id) => { setEntries((p) => p.filter((e) => e.id !== id)); setDetail(null); };
+  const duplicateEntry = (e) => { setEntries((p) => [mkEntry(e.cat, e.type, e.amount, ymd(new Date())), ...p]); setDetail(null); };
+  const loadSample = () => { setEntries(sampleEntries()); setEntered(true); setView("dashboard"); };
+  const enterApp = () => { setEntered(true); setView("dashboard"); };
 
-  const today = todayStr();
-  const todayTotal = useMemo(
-    () => entries.filter((e) => e.date === today).reduce((s, e) => s + entryCO2(e), 0),
-    [entries, today]
-  );
-  const insights = useMemo(() => buildInsights(entries, target), [entries, target]);
+  const units = settings.units;
 
-  const nav = [
-    { id: "dashboard", label: "Today", icon: BarChart3 },
-    { id: "log", label: "Log", icon: Plus },
+  const NAV = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "activities", label: "Activities", icon: ReceiptText },
     { id: "insights", label: "Insights", icon: Lightbulb },
-    { id: "settings", label: "Settings", icon: Settings },
+    { id: "settings", label: "Settings", icon: SettingsIcon },
+    { id: "about", label: "About", icon: BookOpen },
   ];
 
+  if (loading) {
+    return (
+      <div className="cinder"><style>{CSS}</style>
+        <div className="wrap"><Card className="pad" style={{ marginTop: 40, textAlign: "center", color: "var(--sub)" }}>Opening your ledger…</Card></div>
+      </div>
+    );
+  }
+
+  if (!entered) {
+    return (
+      <div className="cinder"><style>{CSS}</style>
+        <Landing onEnter={enterApp} onSample={loadSample} onAbout={() => { setEntered(true); setView("about"); }} />
+      </div>
+    );
+  }
+
   return (
-    <div style={{ fontFamily: FONT_SANS, color: C.ink, background: C.bg, minHeight: "100vh" }}>
-      <div style={{ maxWidth: 880, margin: "0 auto", padding: "0 16px 96px" }}>
-        {/* masthead */}
-        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "22px 2px 14px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 34, height: 34, borderRadius: 9, background: C.brand, display: "grid", placeItems: "center" }}>
-              <Flame size={19} color="#fff" strokeWidth={2.2} />
-            </div>
-            <div>
-              <div style={{ fontFamily: FONT_SERIF, fontSize: 22, fontWeight: 600, letterSpacing: "-0.01em", lineHeight: 1 }}>Cinder</div>
-              <div style={{ fontSize: 11, color: C.sub, letterSpacing: "0.02em" }}>a personal carbon ledger</div>
-            </div>
+    <div className="cinder"><style>{CSS}</style>
+      <div className="wrap">
+        <header className="hdr">
+          <div className="brand" onClick={() => setView("dashboard")}>
+            <div className="mark"><Flame size={19} color="#fff" strokeWidth={2.2} /></div>
+            <div><h1>Cinder</h1><p>carbon ledger</p></div>
           </div>
-          {settings.name ? (
-            <div style={{ fontSize: 13, color: C.sub }}>Hi, {settings.name}</div>
-          ) : null}
+          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={16} /> Add activity</button>
         </header>
 
-        {/* nav */}
-        <nav style={{ display: "flex", gap: 6, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: 5, position: "sticky", top: 8, zIndex: 5, boxShadow: "0 1px 2px rgba(0,0,0,0.03)" }}>
-          {nav.map((n) => {
-            const on = view === n.id;
-            const Icon = n.icon;
-            return (
-              <button key={n.id} onClick={() => setView(n.id)}
-                style={{
-                  flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
-                  padding: "9px 6px", borderRadius: 8, border: "none", cursor: "pointer",
-                  background: on ? C.brand : "transparent", color: on ? "#fff" : C.sub,
-                  fontWeight: on ? 600 : 500, fontSize: 13.5, transition: "all .15s", fontFamily: FONT_SANS,
-                }}>
-                <Icon size={16} strokeWidth={2.1} />
-                <span>{n.label}</span>
-              </button>
-            );
-          })}
-        </nav>
+        <div className="tabwrap">
+          <nav className="tabs">
+            {NAV.map((n) => {
+              const Icon = n.icon; const on = view === n.id;
+              return (
+                <button key={n.id} className={"tab" + (on ? " active" : "")} onClick={() => setView(n.id)}>
+                  <Icon size={16} strokeWidth={2.1} /><span className="lbl">{n.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
 
         <main style={{ marginTop: 18 }}>
-          {loading ? (
-            <Card style={{ padding: 40, textAlign: "center", color: C.sub }}>Opening your ledger…</Card>
-          ) : view === "dashboard" ? (
-            <Dashboard entries={entries} todayTotal={todayTotal} target={target} insights={insights} go={setView} onDelete={deleteEntry} />
-          ) : view === "log" ? (
-            <LogView onAdd={addEntry} entries={entries} onDelete={deleteEntry} />
-          ) : view === "insights" ? (
-            <InsightsView insights={insights} target={target} go={setView} />
-          ) : (
-            <SettingsView settings={settings} setSettings={setSettings} clearAll={() => setEntries([])} count={entries.length} />
-          )}
+          {view === "dashboard" && <Dashboard {...{ entries, range, setRange, units, settings, setView, setAddOpen, setDetail }} />}
+          {view === "activities" && <Activities {...{ entries, units, setAddOpen, setDetail }} />}
+          {view === "insights" && <Insights {...{ entries, range, setRange, units, settings, setAddOpen }} />}
+          {view === "settings" && <SettingsView {...{ settings, setSettings, entries, loadSample, clearAll: () => setEntries([]) }} />}
+          {view === "about" && <About />}
         </main>
 
-        <footer style={{ marginTop: 28, textAlign: "center", fontSize: 11, color: C.sub, lineHeight: 1.6 }}>
-          Estimates use published average emission factors (DEFRA / EPA / Our World in Data).<br />
-          Figures are approximations for personal awareness, not a certified inventory.
+        <footer className="footer">
+          <span>Cinder — an experimental project exploring personal carbon accounting.</span>
+          <span><a onClick={() => setView("about")}>Methodology</a> · Private by default · Your data is yours</span>
         </footer>
       </div>
+
+      {addOpen && <AddActivity onClose={() => setAddOpen(false)} onAdd={addEntry} units={units} />}
+      {detail && <DetailSheet entry={detail} units={units} onClose={() => setDetail(null)} onDelete={deleteEntry} onDuplicate={duplicateEntry} />}
     </div>
   );
 }
 
-/* ================================================================ DASHBOARD */
-function Dashboard({ entries, todayTotal, target, insights, go, onDelete }) {
-  const weekStrs = lastNDayStrings(7);
-  const weekData = weekStrs.map((d) => {
-    const total = entries.filter((e) => e.date === d).reduce((s, e) => s + entryCO2(e), 0);
-    return { day: dayKeyToDate(d).toLocaleDateString("en-US", { weekday: "short" }).slice(0, 2), date: d, total: +total.toFixed(2) };
-  });
-  const weekTotal = weekData.reduce((s, d) => s + d.total, 0);
-  const dailyAvg = weekTotal / 7;
+/* ============================================================ LANDING */
+function Landing({ onEnter, onSample, onAbout }) {
+  return (
+    <div className="wrap">
+      <header className="hdr">
+        <div className="brand" onClick={onEnter}>
+          <div className="mark"><Flame size={19} color="#fff" strokeWidth={2.2} /></div>
+          <div><h1>Cinder</h1><p>carbon ledger</p></div>
+        </div>
+        <button className="btn" onClick={onAbout}>How it works</button>
+      </header>
 
-  // category breakdown over the week
-  const catTotals = {};
-  for (const e of entries.filter((e) => weekStrs.includes(e.date))) {
-    catTotals[e.cat] = (catTotals[e.cat] || 0) + entryCO2(e);
-  }
-  const catSum = Object.values(catTotals).reduce((a, b) => a + b, 0);
+      <section className="hero">
+        <div>
+          <h2>Your carbon footprint, finally visible.</h2>
+          <p className="sub">Log your daily activities, see their carbon impact, and get nudges to do better over time. Built for individuals and small teams who want clarity, not guilt.</p>
+          <div className="cta-row">
+            <button className="btn primary lg" onClick={onEnter}>Open the ledger <ArrowRight size={17} /></button>
+            <button className="btn lg" onClick={onSample}><Sparkles size={16} /> View sample data</button>
+          </div>
+          <div className="trust">
+            <span><Check size={14} color="var(--brand)" /> Private by default</span>
+            <span><Check size={14} color="var(--brand)" /> No ads</span>
+            <span><Check size={14} color="var(--brand)" /> Your data is yours</span>
+          </div>
+        </div>
+        <div className="mock">
+          <div style={{ fontSize: 11, color: "var(--sub)", fontWeight: 600, letterSpacing: ".1em", textTransform: "uppercase" }}>This month</div>
+          <div className="num" style={{ fontSize: 38, fontWeight: 800, letterSpacing: "-.02em", margin: "4px 0 2px" }}>142<small style={{ fontSize: 14, color: "var(--sub)", marginLeft: 5 }}>kg CO₂e</small></div>
+          <div className="delta down" style={{ marginTop: 0 }}><ArrowDownRight size={14} /> 12% vs last month</div>
+          <div style={{ marginTop: 14 }}>
+            {[["Travel", 0.58, "#0F766E"], ["Food", 0.22, "#C9892F"], ["Energy", 0.14, "#3B6EA5"], ["Purchases", 0.06, "#A65D57"]].map(([l, w, c]) => (
+              <div className="row" key={l}>
+                <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span className="dot" style={{ background: c }} />{l}</span>
+                <span className="num" style={{ fontWeight: 600 }}>{Math.round(142 * w)} kg</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="section">
+        <h3>How it works</h3>
+        <div className="steps">
+          {[
+            ["Step 1", "Log activities", "Flights, rides, purchases, energy use — add them in seconds."],
+            ["Step 2", "See the impact", "We convert them into estimated CO₂e using transparent, open methodologies."],
+            ["Step 3", "Act on insights", "Spot patterns, set a carbon budget, and track progress over time."],
+          ].map(([n, h, p]) => (
+            <Card className="pad step" key={n}>
+              <div className="n">{n}</div><h4>{h}</h4><p>{p}</p>
+            </Card>
+          ))}
+        </div>
+      </section>
+
+      <section className="section">
+        <h3>What you get</h3>
+        <div className="feat">
+          {[
+            [ReceiptText, "Carbon ledger", "A clean, filterable list of every carbon-impacting activity."],
+            [TrendingUp, "Trends & charts", "Weekly and monthly emissions, broken down by category."],
+            [Target, "Goals & limits", "Set a monthly carbon budget and see how you're tracking."],
+            [Info, "Transparency", "Every estimate shows the underlying emission factor and source."],
+          ].map(([Ic, h, p]) => (
+            <Card className="pad" key={h} style={{ display: "flex", gap: 13 }}>
+              <div className="icwrap" style={{ background: "var(--brand-soft)" }}><Ic size={18} color="var(--brand)" /></div>
+              <div><div style={{ fontWeight: 700, fontSize: 15 }}>{h}</div><div style={{ color: "var(--sub)", fontSize: 13.5, marginTop: 3 }}>{p}</div></div>
+            </Card>
+          ))}
+        </div>
+        <div className="badges">
+          <span className="badge">Individuals</span>
+          <span className="badge">Climate-conscious teams</span>
+          <span className="badge">Sustainability nerds</span>
+        </div>
+        <p style={{ color: "var(--sub)", fontSize: 13, marginTop: 14 }}>Upcoming: team workspaces, CSV import, API access.</p>
+      </section>
+
+      <footer className="footer">
+        <span>Cinder — an experimental project exploring personal carbon accounting.</span>
+        <span><a onClick={onAbout}>Methodology</a> · <a onClick={onEnter}>Open the ledger</a></span>
+      </footer>
+    </div>
+  );
+}
+
+/* ============================================================ DASHBOARD */
+function RangeSelect({ range, setRange }) {
+  return (
+    <div className="seg">
+      {RANGES.map((r) => (
+        <button key={r.key} className={range === r.key ? "on" : ""} onClick={() => setRange(r.key)}>{r.label}</button>
+      ))}
+    </div>
+  );
+}
+
+function Dashboard({ entries, range, setRange, units, settings, setView, setAddOpen, setDetail }) {
+  const r = useMemo(() => getRange(range, entries), [range, entries]);
+  const inP = useMemo(() => entries.filter((e) => inRange(e, r.start, r.end)), [entries, r]);
+  const prevP = useMemo(() => (r.prevStart ? entries.filter((e) => inRange(e, r.prevStart, r.prevEnd)) : []), [entries, r]);
+  const total = inP.reduce((s, e) => s + e.co2, 0);
+  const prevTotal = prevP.reduce((s, e) => s + e.co2, 0);
+  const delta = prevTotal > 0 ? Math.round(((total - prevTotal) / prevTotal) * 100) : null;
+  const ct = catTotals(inP);
+  const topCat = Object.keys(ct).sort((a, b) => ct[b] - ct[a])[0];
+  const series = useMemo(() => buildSeries(entries, r), [entries, r]);
+
+  // monthly budget progress (current calendar month)
+  const mr = getRange("month", entries);
+  const monthTotal = entries.filter((e) => inRange(e, mr.start, mr.end)).reduce((s, e) => s + e.co2, 0);
+  const budgetPct = settings.monthlyBudget > 0 ? (monthTotal / settings.monthlyBudget) * 100 : 0;
 
   if (entries.length === 0) {
     return (
-      <Card style={{ padding: "44px 28px", textAlign: "center" }}>
-        <div style={{ width: 56, height: 56, borderRadius: 14, background: C.brandSoft, display: "grid", placeItems: "center", margin: "0 auto 16px" }}>
-          <Leaf size={26} color={C.brand} />
+      <Card className="empty">
+        <div className="badge-ic"><ReceiptText size={24} color="var(--brand)" /></div>
+        <h3>No activities yet</h3>
+        <p>Start by logging your first carbon-impacting action, or load sample data to see how everything works.</p>
+        <div className="cta-row" style={{ justifyContent: "center" }}>
+          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={16} /> Add your first activity</button>
+          <button className="btn" onClick={() => setView("settings")}><Sparkles size={16} /> Load sample data</button>
         </div>
-        <div style={{ fontFamily: FONT_SERIF, fontSize: 24, fontWeight: 600, marginBottom: 8 }}>Your ledger is empty</div>
-        <p style={{ color: C.sub, fontSize: 14.5, maxWidth: 380, margin: "0 auto 22px", lineHeight: 1.55 }}>
-          Log a trip, a meal, or your energy use and Cinder starts drawing your daily carbon budget — then tells you exactly where to cut.
-        </p>
-        <button onClick={() => go("log")} style={primaryBtn}>
-          Log your first activity <ArrowRight size={16} />
-        </button>
       </Card>
     );
   }
 
-  const pct = Math.min(100, (todayTotal / target) * 100);
-  const over = todayTotal > target;
-  const remaining = target - todayTotal;
+  const donutData = CAT_ORDER.filter((k) => ct[k]).map((k) => ({ name: CATS[k].label, value: +ct[k].toFixed(2), cat: k }));
+  const tickEvery = series.length > 14 ? Math.ceil(series.length / 8) : 0;
 
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      {/* SIGNATURE: today's budget gauge */}
-      <Card style={{ padding: "22px 22px 24px" }}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-          <Eyebrow>Today’s carbon · {dayKeyToDate(todayStr()).toLocaleDateString("en-US", { month: "long", day: "numeric" })}</Eyebrow>
-          <div style={{ fontSize: 12.5, color: over ? C.warn : C.good, fontWeight: 600 }}>
-            {over ? `${fmt(todayTotal - target)} kg over budget` : `${fmt(remaining)} kg left in budget`}
-          </div>
-        </div>
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 10, margin: "6px 0 16px" }}>
-          <span style={{ fontFamily: FONT_SERIF, fontSize: 56, fontWeight: 600, lineHeight: 0.9, letterSpacing: "-0.02em", fontVariantNumeric: "tabular-nums" }}>
-            {fmt(todayTotal)}
-          </span>
-          <span style={{ fontSize: 15, color: C.sub, paddingBottom: 8 }}>kg CO₂e</span>
-        </div>
-        {/* gauge */}
-        <div style={{ position: "relative", height: 14, background: C.bg, borderRadius: 8, overflow: "hidden" }}>
-          <div style={{ position: "absolute", inset: 0, width: `${pct}%`, background: over ? C.warn : C.good, borderRadius: 8, transition: "width .5s ease" }} />
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 7, fontSize: 11.5, color: C.sub }}>
-          <span>0</span>
-          <span>daily budget · {target} kg</span>
-        </div>
-      </Card>
-
-      {/* stat strip */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
-        <Stat label="This week" value={fmt(weekTotal)} unit="kg" />
-        <Stat label="Daily average" value={fmt(dailyAvg)} unit="kg"
-          accent={dailyAvg <= target ? C.good : C.warn} />
-        <Stat label="vs sustainable" value={`${dailyAvg <= SUSTAINABLE_DAILY ? "−" : "+"}${fmt(Math.abs(dailyAvg - SUSTAINABLE_DAILY))}`} unit="kg/day"
-          accent={dailyAvg <= SUSTAINABLE_DAILY ? C.good : C.amber} />
+    <div className="grid">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div className="eyebrow">Overview · {r.label}</div>
+        <RangeSelect range={range} setRange={setRange} />
       </div>
 
-      {/* weekly trend */}
-      <Card style={{ padding: "18px 18px 8px" }}>
-        <Eyebrow>Last 7 days</Eyebrow>
-        <div style={{ height: 180, marginTop: 10 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={weekData} margin={{ top: 8, right: 4, left: -22, bottom: 0 }}>
-              <XAxis dataKey="day" tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} width={42} />
-              <Tooltip
-                cursor={{ fill: "rgba(0,0,0,0.04)" }}
-                contentStyle={{ borderRadius: 10, border: `1px solid ${C.line}`, fontSize: 12, fontFamily: FONT_SANS }}
-                formatter={(v) => [`${fmt(v)} kg CO₂e`, "Total"]}
-                labelFormatter={(l, p) => p?.[0] ? dayKeyToDate(p[0].payload.date).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }) : l}
-              />
-              <ReferenceLine y={target} stroke={C.warn} strokeDasharray="4 4" strokeWidth={1.2} />
-              <Bar dataKey="total" radius={[5, 5, 0, 0]} maxBarSize={42}>
-                {weekData.map((d, i) => <Cell key={i} fill={d.total > target ? C.warn : C.good} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </Card>
+      <div className="grid cols-4">
+        <StatCard k={`Total — ${r.label}`} value={fmt(total, units)} units={unitLabel(units)} />
+        <StatCard k="Change" chip={delta === null
+          ? <div className="chip" style={{ color: "var(--sub)" }}>No prior period</div>
+          : null} delta={delta} />
+        <StatCard k="Top category" chip={topCat
+          ? <div className="chip" style={{ color: CATS[topCat].color }}><span className="dot" style={{ background: CATS[topCat].color }} />{CATS[topCat].label} · {Math.round((ct[topCat] / total) * 100)}%</div>
+          : <div className="chip" style={{ color: "var(--sub)" }}>—</div>} />
+        <StatCard k="Monthly budget" value={Math.round(budgetPct) + "%"} bar={{ pct: budgetPct, color: budgetPct > 100 ? "var(--warn)" : "var(--brand)", note: `${fmt(monthTotal, units)} of ${fmt(settings.monthlyBudget, units)} ${unitLabel(units)}` }} />
+      </div>
 
-      {/* breakdown */}
-      {catSum > 0 && (
-        <Card style={{ padding: 18 }}>
-          <Eyebrow>Where it came from · this week</Eyebrow>
-          <div style={{ display: "flex", height: 16, borderRadius: 8, overflow: "hidden", margin: "12px 0 14px", background: C.bg }}>
-            {Object.keys(CATS).map((k) =>
-              catTotals[k] ? (
-                <div key={k} style={{ width: `${(catTotals[k] / catSum) * 100}%`, background: CATS[k].color }} title={CATS[k].label} />
-              ) : null
-            )}
+      <div className="split">
+        <Card className="pad">
+          <div className="eyebrow">Emissions over time</div>
+          <div style={{ height: 230, marginTop: 12 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={series} margin={{ top: 6, right: 4, left: -20, bottom: 0 }}>
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--sub)" }} axisLine={false} tickLine={false} interval={tickEvery || 0} />
+                <YAxis tick={{ fontSize: 11, fill: "var(--sub)" }} axisLine={false} tickLine={false} width={44} />
+                <Tooltip cursor={{ fill: "rgba(15,118,110,.06)" }} contentStyle={{ borderRadius: 10, border: "1px solid var(--line)", fontSize: 12 }} formatter={(v) => [`${fmt(v)} kg CO₂e`, "Total"]} />
+                <Bar dataKey="total" radius={[4, 4, 0, 0]} maxBarSize={46} fill="var(--brand)" />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 18px" }}>
-            {Object.keys(CATS).map((k) => (
-              <div key={k} style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                <span style={{ width: 11, height: 11, borderRadius: 3, background: CATS[k].color, flexShrink: 0 }} />
-                <span style={{ fontSize: 13.5, flex: 1 }}>{CATS[k].label}</span>
-                <span style={{ fontSize: 13.5, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmt(catTotals[k] || 0)} kg</span>
-                <span style={{ fontSize: 12, color: C.sub, width: 36, textAlign: "right" }}>{catSum ? Math.round(((catTotals[k] || 0) / catSum) * 100) : 0}%</span>
+        </Card>
+
+        <Card className="pad">
+          <div className="eyebrow">By category</div>
+          <div className="donut" style={{ height: 180, marginTop: 8 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={donutData} dataKey="value" nameKey="name" innerRadius={56} outerRadius={82} paddingAngle={2} stroke="none">
+                  {donutData.map((d) => <Cell key={d.cat} fill={CATS[d.cat].color} />)}
+                </Pie>
+                <Tooltip formatter={(v, n) => [`${fmt(v)} kg CO₂e`, n]} contentStyle={{ borderRadius: 10, border: "1px solid var(--line)", fontSize: 12 }} />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="center"><b className="num">{fmt(total, units)}</b><span>{unitLabel(units)}</span></div>
+          </div>
+          <div style={{ display: "grid", gap: 7, marginTop: 6 }}>
+            {donutData.map((d) => (
+              <div key={d.cat} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                <span className="dot" style={{ background: CATS[d.cat].color }} />
+                <span style={{ flex: 1 }}>{d.name}</span>
+                <span className="num" style={{ fontWeight: 600 }}>{Math.round((d.value / total) * 100)}%</span>
               </div>
             ))}
           </div>
         </Card>
-      )}
+      </div>
 
-      {/* top insight teaser */}
-      {insights.ready && insights.list.length > 0 && (
-        <button onClick={() => go("insights")} style={{ textAlign: "left", border: "none", cursor: "pointer", padding: 0, background: "none" }}>
-          <Card style={{ padding: 18, display: "flex", gap: 14, alignItems: "center", background: C.brand }}>
-            <div style={{ width: 38, height: 38, borderRadius: 10, background: "rgba(255,255,255,0.15)", display: "grid", placeItems: "center", flexShrink: 0 }}>
-              <Lightbulb size={20} color="#fff" />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>Biggest opportunity</div>
-              <div style={{ color: "#fff", fontWeight: 600, fontSize: 15, marginTop: 2 }}>{insights.list[0].title}</div>
-              <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 12.5, marginTop: 2 }}>
-                Save up to {fmtYr(insights.list[0].saving)} CO₂e a year
-              </div>
-            </div>
-            <ArrowRight size={18} color="#fff" />
-          </Card>
-        </button>
-      )}
-
-      <RecentLedger entries={entries} onDelete={onDelete} limit={5} />
+      <Card className="pad">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="eyebrow">Recent activity</div>
+          <a className="link" onClick={() => setView("activities")}>View full ledger →</a>
+        </div>
+        <div style={{ marginTop: 8, overflowX: "auto" }}>
+          <LedgerTable rows={entries.slice(0, 6)} units={units} onRow={setDetail} compact />
+        </div>
+      </Card>
     </div>
   );
 }
 
-function Stat({ label, value, unit, accent }) {
+/* ============================================================ LEDGER TABLE (shared) */
+function LedgerTable({ rows, units, onRow, compact }) {
+  if (rows.length === 0) return <div style={{ color: "var(--sub)", fontSize: 14, padding: "16px 4px" }}>No activities match these filters.</div>;
   return (
-    <Card style={{ padding: "14px 14px 13px" }}>
-      <div style={{ fontSize: 11, color: C.sub, letterSpacing: "0.04em" }}>{label}</div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 5 }}>
-        <span style={{ fontFamily: FONT_SERIF, fontSize: 26, fontWeight: 600, color: accent || C.ink, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{value}</span>
-        <span style={{ fontSize: 11, color: C.sub }}>{unit}</span>
-      </div>
-    </Card>
+    <table className="ledger">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Activity</th>
+          {!compact && <th className="hide-sm">Category</th>}
+          <th className="hide-sm">Amount</th>
+          <th className="right">CO₂e</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((e) => {
+          const c = CATS[e.cat]; const Icon = c.icon;
+          return (
+            <tr key={e.id} className="row" onClick={() => onRow(e)}>
+              <td style={{ color: "var(--sub)", whiteSpace: "nowrap" }}>{parseYMD(e.date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</td>
+              <td>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className="icwrap" style={{ background: c.color + "1A" }}><Icon size={15} color={c.color} /></span>
+                  <span style={{ fontWeight: 500 }}>{FACTORS[e.cat][e.type].label}</span>
+                </div>
+              </td>
+              {!compact && <td className="hide-sm"><CatTag cat={e.cat} /></td>}
+              <td className="hide-sm num" style={{ color: "var(--ink-2)" }}>{e.amount.toLocaleString()} {unitOf(e.cat, e.type)}</td>
+              <td className="right num" style={{ fontWeight: 700 }}>{fmt(e.co2, units)} <span style={{ color: "var(--sub)", fontWeight: 500, fontSize: 11 }}>{unitLabel(units)}</span></td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 
-/* ================================================================ LOG */
-function LogView({ onAdd, entries, onDelete }) {
-  const [cat, setCat] = useState("transport");
-  const [type, setType] = useState("");
-  const [amount, setAmount] = useState("");
-  const [date, setDate] = useState(todayStr());
-  const [flash, setFlash] = useState(false);
-
-  const items = FACTORS[cat];
-  const unit = CATS[cat].unit;
-  const preview = type && amount ? (FACTORS[cat][type].f * parseFloat(amount || 0)) : null;
-
-  const submit = () => {
-    if (onAdd(cat, type, amount, date)) {
-      setAmount(""); setType("");
-      setFlash(true); setTimeout(() => setFlash(false), 1400);
-    }
-  };
+/* ============================================================ ACTIVITIES */
+function Activities({ entries, units, setAddOpen, setDetail }) {
+  const [cat, setCat] = useState("all");
+  const [range, setRange] = useState("all");
+  const [q, setQ] = useState("");
+  const r = useMemo(() => getRange(range, entries), [range, entries]);
+  const rows = useMemo(() => entries
+    .filter((e) => (range === "all" ? true : inRange(e, r.start, r.end)))
+    .filter((e) => (cat === "all" ? true : e.cat === cat))
+    .filter((e) => (q ? FACTORS[e.cat][e.type].label.toLowerCase().includes(q.toLowerCase()) : true)),
+    [entries, cat, range, q, r]);
+  const sum = rows.reduce((s, e) => s + e.co2, 0);
 
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <Card style={{ padding: 18 }}>
-        <Eyebrow>Add to your ledger</Eyebrow>
+    <div className="grid">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div className="eyebrow">Activities · {rows.length} entries · {fmt(sum, units)} {unitLabel(units)}</div>
+        <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={16} /> Add activity</button>
+      </div>
 
-        {/* category picker */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, margin: "12px 0 16px" }}>
-          {Object.keys(CATS).map((k) => {
-            const on = cat === k; const Icon = CATS[k].icon;
+      <Card className="pad" style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ position: "relative", flex: "1 1 200px" }}>
+          <Search size={15} color="var(--sub)" style={{ position: "absolute", left: 11, top: 11 }} />
+          <input className="input" style={{ paddingLeft: 32 }} placeholder="Search activities" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+        <select className="select" style={{ width: "auto" }} value={cat} onChange={(e) => setCat(e.target.value)}>
+          <option value="all">All categories</option>
+          {CAT_ORDER.map((k) => <option key={k} value={k}>{CATS[k].label}</option>)}
+        </select>
+        <select className="select" style={{ width: "auto" }} value={range} onChange={(e) => setRange(e.target.value)}>
+          <option value="all">All time</option>
+          {RANGES.filter((x) => x.key !== "all").map((x) => <option key={x.key} value={x.key}>{x.label}</option>)}
+        </select>
+      </Card>
+
+      <Card className="pad" style={{ overflowX: "auto" }}>
+        <LedgerTable rows={rows} units={units} onRow={setDetail} />
+      </Card>
+    </div>
+  );
+}
+
+/* ============================================================ INSIGHTS */
+function Insights({ entries, range, setRange, units, settings, setAddOpen }) {
+  const r = useMemo(() => getRange(range, entries), [range, entries]);
+  const inP = useMemo(() => entries.filter((e) => inRange(e, r.start, r.end)), [entries, r]);
+  const prevP = useMemo(() => (r.prevStart ? entries.filter((e) => inRange(e, r.prevStart, r.prevEnd)) : []), [entries, r]);
+
+  if (inP.length < 3) {
+    return (
+      <Card className="empty">
+        <div className="badge-ic" style={{ background: "#FBF0DC" }}><Lightbulb size={24} color="var(--amber)" /></div>
+        <h3>Insights need a little more data</h3>
+        <p>Log a few activities over {r.label === "all time" ? "a week or two" : r.label} and Cinder will surface your biggest, most realistic ways to cut — each with the carbon you'd save.</p>
+        <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={16} /> Add activity</button>
+      </Card>
+    );
+  }
+
+  const total = inP.reduce((s, e) => s + e.co2, 0);
+  const top = typeTotals(inP).slice(0, 3);
+  const ct = catTotals(inP);
+  const ctPrev = catTotals(prevP);
+  const catBars = CAT_ORDER.filter((k) => ct[k]).map((k) => ({ cat: k, label: CATS[k].label, value: ct[k] }));
+  const maxBar = Math.max(...catBars.map((b) => b.value), 1);
+
+  // levers
+  const levers = [];
+  const days = Math.max(1, Math.round((r.end - r.start) / 86400000));
+  const annualize = (v) => (v / days) * 365;
+  const byType = {}; for (const e of inP) { (byType[e.type] ||= 0); byType[e.type] += e.co2; }
+  const carCo2 = (byType.car_petrol || 0) + (byType.car_diesel || 0);
+  if (carCo2 > 0.5) levers.push({ cat: "travel", title: "Shift short car trips to transit or cycling", saving: annualize(carCo2 * 0.5), body: `Driving was ${fmt(carCo2)} kg in ${r.label}. Moving about half onto transit or a bike trims roughly this much a year.` });
+  const fly = (byType.flight_short || 0) + (byType.flight_long || 0);
+  if (fly > 5) levers.push({ cat: "travel", title: "One fewer short-haul flight a year", saving: 400, body: `Air travel added ${fmt(fly)} kg in ${r.label}. A single return short-haul trip is often ~400 kg — the highest-leverage change available.` });
+  const red = (byType.beef || 0) + (byType.lamb || 0);
+  if (red > 0.5) levers.push({ cat: "food", title: "Swap half your red-meat meals", saving: annualize(red * 0.6), body: `Red meat was ${fmt(red)} kg in ${r.label}. Replacing half with chicken, fish, or beans is the biggest lever on a plate.` });
+  if ((byType.electricity || 0) > 1) levers.push({ cat: "energy", title: "Trim cooling and standby load", saving: annualize((byType.electricity || 0) * 0.15), body: `Electricity was ${fmt(byType.electricity || 0)} kg. A 15% cut — efficient cooling, LEDs, killing standby — adds up.` });
+  levers.sort((a, b) => b.saving - a.saving);
+
+  // streak: weeks under weekly budget over last 8 weeks
+  const weeklyBudget = settings.monthlyBudget / 4.345;
+  let streak = 0, weeksUnder = 0;
+  for (let w = 0; w < 8; w++) {
+    const wEnd = addDays(startOfDay(new Date()), -7 * w + 1);
+    const wStart = addDays(wEnd, -7);
+    const wt = entries.filter((e) => inRange(e, wStart, wEnd)).reduce((s, e) => s + e.co2, 0);
+    if (wt > 0 && wt <= weeklyBudget) { weeksUnder++; if (w === streak) streak++; }
+  }
+
+  return (
+    <div className="grid">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div className="eyebrow">Insights · {r.label}</div>
+        <RangeSelect range={range} setRange={setRange} />
+      </div>
+
+      <div className="split">
+        <Card className="pad">
+          <div className="eyebrow">Top contributors</div>
+          <div style={{ display: "grid", gap: 12, marginTop: 14 }}>
+            {top.map((t, i) => {
+              const c = CATS[t.cat]; const Icon = c.icon;
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span className="icwrap" style={{ background: c.color + "1A" }}><Icon size={16} color={c.color} /></span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{FACTORS[t.cat][t.type].label}</div>
+                    <div style={{ fontSize: 12, color: "var(--sub)" }}>{c.label} · {t.count} {t.count === 1 ? "entry" : "entries"}</div>
+                  </div>
+                  <div className="num" style={{ fontWeight: 700 }}>{fmt(t.co2, units)} <span style={{ color: "var(--sub)", fontSize: 11, fontWeight: 500 }}>{Math.round((t.co2 / total) * 100)}%</span></div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+
+        <Card className="pad">
+          <div className="eyebrow">Category comparison</div>
+          <div style={{ display: "grid", gap: 12, marginTop: 14 }}>
+            {catBars.map((b) => (
+              <div key={b.cat}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 5 }}>
+                  <span>{b.label}</span><span className="num" style={{ fontWeight: 600 }}>{fmt(b.value, units)} {unitLabel(units)}</span>
+                </div>
+                <div className="minibar" style={{ marginTop: 0 }}><div style={{ width: `${(b.value / maxBar) * 100}%`, background: CATS[b.cat].color }} /></div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      <Card className="pad" style={{ display: "flex", gap: 14, alignItems: "center", background: "var(--brand-soft)", borderColor: "var(--brand-soft)" }}>
+        <div className="icwrap" style={{ background: "var(--brand)", width: 38, height: 38 }}><Target size={19} color="#fff" /></div>
+        <div>
+          <div style={{ fontWeight: 700, color: "var(--brand)" }}>Streaks &amp; habits</div>
+          <div style={{ fontSize: 13.5, color: "var(--ink-2)", marginTop: 2 }}>
+            {weeksUnder > 0 ? `${weeksUnder} of the last 8 weeks came in under your weekly budget (~${fmt(weeklyBudget, units)} ${unitLabel(units)})` : "No weeks under budget yet in the last 8 — set a realistic budget in Settings and build from there."}
+            {streak > 1 ? ` — ${streak} in a row right now.` : ""}
+          </div>
+        </div>
+      </Card>
+
+      {levers.length > 0 && <div className="eyebrow">Where to cut, ranked by yearly impact</div>}
+      {levers.map((lv, i) => {
+        const c = CATS[lv.cat]; const Icon = c.icon;
+        return (
+          <Card key={i} className="pad" style={{ display: "flex", gap: 14 }}>
+            <span className="icwrap" style={{ background: c.color, width: 40, height: 40 }}><Icon size={19} color="#fff" /></span>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{lv.title}</div>
+                <span className="tag" style={{ background: "var(--brand-soft)", color: "var(--brand)", whiteSpace: "nowrap", fontWeight: 700 }}>−{fmt(lv.saving, units)} {unitLabel(units)}/yr</span>
+              </div>
+              <p style={{ color: "var(--sub)", fontSize: 13.5, margin: "6px 0 0", lineHeight: 1.55 }}>{lv.body}</p>
+            </div>
+          </Card>
+        );
+      })}
+
+      {prevP.length > 0 && (
+        <Card className="pad">
+          <div className="eyebrow">What changed vs the previous period</div>
+          <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+            {CAT_ORDER.filter((k) => ct[k] || ctPrev[k]).map((k) => {
+              const now = ct[k] || 0, was = ctPrev[k] || 0; const d = was > 0 ? Math.round(((now - was) / was) * 100) : null;
+              return (
+                <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13.5 }}>
+                  <span className="dot" style={{ background: CATS[k].color }} />
+                  <span style={{ flex: 1 }}>{CATS[k].label}</span>
+                  <span className="num" style={{ color: "var(--sub)" }}>{fmt(now, units)} {unitLabel(units)}</span>
+                  {d === null ? <span style={{ width: 64, textAlign: "right", color: "var(--sub)", fontSize: 12 }}>new</span>
+                    : <span className={"delta " + (d >= 0 ? "up" : "down")} style={{ width: 64, justifyContent: "flex-end", marginTop: 0 }}>{d >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}{Math.abs(d)}%</span>}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================ ADD ACTIVITY (sheet) */
+function AddActivity({ onClose, onAdd, units }) {
+  const [cat, setCat] = useState("travel");
+  const [type, setType] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(ymd(new Date()));
+  const items = FACTORS[cat];
+  const u = type ? unitOf(cat, type) : CATS[cat].unit;
+  const est = type && amount ? factorOf(cat, type) * parseFloat(amount || 0) : null;
+
+  const save = () => { if (onAdd(cat, type, amount, date)) onClose(); };
+
+  return (
+    <div className="scrim" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-h">
+          <div style={{ fontWeight: 700, fontSize: 18, letterSpacing: "-.01em" }}>Add activity</div>
+          <button className="iconbtn" onClick={onClose}><X size={18} /></button>
+        </div>
+
+        <label className="lbl">Category</label>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 7, marginBottom: 16 }}>
+          {CAT_ORDER.map((k) => {
+            const Icon = CATS[k].icon; const on = cat === k;
             return (
-              <button key={k} onClick={() => { setCat(k); setType(""); }}
-                style={{
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "12px 4px",
-                  borderRadius: 12, cursor: "pointer", fontFamily: FONT_SANS, fontSize: 12, fontWeight: on ? 600 : 500,
-                  border: `1.5px solid ${on ? CATS[k].color : C.line}`,
-                  background: on ? CATS[k].color : C.surface, color: on ? "#fff" : C.ink, transition: "all .15s",
-                }}>
-                <Icon size={20} strokeWidth={2} />
-                {CATS[k].label}
+              <button key={k} onClick={() => { setCat(k); setType(""); }} title={CATS[k].label}
+                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5, padding: "11px 2px", borderRadius: 11, cursor: "pointer",
+                  fontFamily: "inherit", fontSize: 10.5, fontWeight: on ? 700 : 500,
+                  border: `1.5px solid ${on ? CATS[k].color : "var(--line)"}`, background: on ? CATS[k].color : "var(--surface)", color: on ? "#fff" : "var(--ink-2)" }}>
+                <Icon size={17} />{CATS[k].label}
               </button>
             );
           })}
         </div>
 
-        {/* type */}
-        <label style={lbl}>What was it?</label>
-        <select value={type} onChange={(e) => setType(e.target.value)} style={input}>
+        <label className="lbl">Activity</label>
+        <select className="select" value={type} onChange={(e) => setType(e.target.value)}>
           <option value="">Choose…</option>
           {Object.keys(items).map((k) => <option key={k} value={k}>{items[k].label}</option>)}
         </select>
 
-        {/* amount + date */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
           <div>
-            <label style={lbl}>Amount ({unit})</label>
-            <input type="number" min="0" step="any" value={amount} placeholder={unit === "meal" || unit === "item" ? "1" : "10"}
-              onChange={(e) => setAmount(e.target.value)} style={input} />
+            <label className="lbl">Amount ({u})</label>
+            <input className="input" type="number" min="0" step="any" value={amount}
+              placeholder={u === "km" ? "10" : u === "$" ? "50" : "1"} onChange={(e) => setAmount(e.target.value)} />
           </div>
           <div>
-            <label style={lbl}>Date</label>
-            <input type="date" max={todayStr()} value={date} onChange={(e) => setDate(e.target.value)} style={input} />
+            <label className="lbl">Date</label>
+            <input className="input" type="date" max={ymd(new Date())} value={date} onChange={(e) => setDate(e.target.value)} />
           </div>
         </div>
 
-        {preview != null && (
-          <div style={{ marginTop: 14, padding: "10px 14px", background: C.brandSoft, borderRadius: 10, fontSize: 13.5, color: C.ink }}>
-            That’s about <strong style={{ fontVariantNumeric: "tabular-nums" }}>{fmt(preview)} kg CO₂e</strong>.
+        <div style={{ marginTop: 16, padding: "13px 15px", background: est != null ? "var(--brand-soft)" : "var(--line-2)", borderRadius: 12 }}>
+          <div style={{ fontSize: 11.5, color: "var(--sub)", fontWeight: 600 }}>ESTIMATED IMPACT</div>
+          <div className="num" style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-.02em", marginTop: 3, color: est != null ? "var(--brand)" : "var(--sub)" }}>
+            {est != null ? `${fmt(est, units)} ${unitLabel(units)}` : "—"}
           </div>
-        )}
+          {type && <div style={{ fontSize: 11.5, color: "var(--sub)", marginTop: 3 }}>Factor: {factorOf(cat, type)} kg CO₂e / {u} · DEFRA/EPA/OWID averages</div>}
+        </div>
 
-        <button onClick={submit} disabled={!type || !amount}
-          style={{ ...primaryBtn, width: "100%", justifyContent: "center", marginTop: 16, opacity: (!type || !amount) ? 0.5 : 1, cursor: (!type || !amount) ? "not-allowed" : "pointer" }}>
-          {flash ? <><Check size={16} /> Added to ledger</> : <><Plus size={16} /> Add to ledger</>}
+        <button className="btn primary" style={{ width: "100%", marginTop: 18, padding: 12 }} disabled={!type || !amount} onClick={save}>
+          <Plus size={16} /> Add to ledger
         </button>
-      </Card>
-
-      <RecentLedger entries={entries} onDelete={onDelete} limit={8} title="Recent entries" />
-    </div>
-  );
-}
-
-/* ================================================================ INSIGHTS */
-function InsightsView({ insights, target, go }) {
-  if (!insights.ready) {
-    return (
-      <Card style={{ padding: "40px 28px", textAlign: "center" }}>
-        <Lightbulb size={30} color={C.amber} style={{ margin: "0 auto 12px" }} />
-        <div style={{ fontFamily: FONT_SERIF, fontSize: 21, fontWeight: 600, marginBottom: 6 }}>Insights need a few days of data</div>
-        <p style={{ color: C.sub, fontSize: 14, maxWidth: 360, margin: "0 auto 20px", lineHeight: 1.55 }}>
-          Log activity over a week and Cinder will rank your biggest, most realistic ways to cut — each with the carbon you’d save per year.
-        </p>
-        <button onClick={() => go("log")} style={primaryBtn}>Log activity <ArrowRight size={16} /></button>
-      </Card>
-    );
-  }
-
-  const { dailyAvg } = insights;
-  const scaleMax = Math.max(dailyAvg, target, SUSTAINABLE_DAILY) * 1.15;
-  const mark = (v) => `${Math.min(100, (v / scaleMax) * 100)}%`;
-
-  return (
-    <div style={{ display: "grid", gap: 14 }}>
-      {/* benchmark bar */}
-      <Card style={{ padding: 20 }}>
-        <Eyebrow>How your daily average compares</Eyebrow>
-        <div style={{ position: "relative", height: 16, background: C.bg, borderRadius: 8, margin: "26px 0 8px" }}>
-          <div style={{ position: "absolute", inset: 0, width: mark(dailyAvg), background: dailyAvg <= SUSTAINABLE_DAILY ? C.good : dailyAvg <= target ? C.amber : C.warn, borderRadius: 8, transition: "width .5s" }} />
-          {/* markers */}
-          <Marker pos={mark(SUSTAINABLE_DAILY)} color={C.good} label={`Sustainable ${SUSTAINABLE_DAILY}`} />
-          <Marker pos={mark(target)} color={C.ink} label={`Your goal ${target}`} top />
-        </div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 18 }}>
-          <span style={{ fontFamily: FONT_SERIF, fontSize: 32, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmt(dailyAvg)}</span>
-          <span style={{ fontSize: 13, color: C.sub }}>kg CO₂e / day · annualised ≈ {fmtYr(dailyAvg * 365)}</span>
-        </div>
-      </Card>
-
-      {/* ranked actions */}
-      <div>
-        <Eyebrow>Your biggest levers, ranked by yearly impact</Eyebrow>
-      </div>
-      {insights.list.map((ins, i) => {
-        const c = CATS[ins.cat];
-        return (
-          <Card key={i} style={{ padding: 18, display: "flex", gap: 14 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 10, background: c.color, display: "grid", placeItems: "center", flexShrink: 0 }}>
-              <c.icon size={20} color="#fff" />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
-                <div style={{ fontWeight: 600, fontSize: 15.5, lineHeight: 1.25 }}>{ins.title}</div>
-                <div style={{ flexShrink: 0, background: C.brandSoft, color: C.brand, fontWeight: 700, fontSize: 12.5, padding: "4px 9px", borderRadius: 20, whiteSpace: "nowrap" }}>
-                  −{fmtYr(ins.saving)}/yr
-                </div>
-              </div>
-              <p style={{ color: C.sub, fontSize: 13.5, marginTop: 6, lineHeight: 1.55 }}>{ins.body}</p>
-            </div>
-          </Card>
-        );
-      })}
-
-      {/* wins */}
-      {insights.wins.length > 0 && (
-        <Card style={{ padding: 18, background: C.brandSoft, border: `1px solid ${C.brandSoft}` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <Leaf size={17} color={C.brand} />
-            <span style={{ fontWeight: 600, fontSize: 14.5, color: C.brand }}>What you’re already doing well</span>
-          </div>
-          <div style={{ display: "grid", gap: 8 }}>
-            {insights.wins.map((w, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, fontSize: 13.5, color: C.ink }}>
-                <Check size={16} color={C.good} style={{ flexShrink: 0, marginTop: 2 }} />
-                <span>{w}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-    </div>
-  );
-}
-function Marker({ pos, color, label, top }) {
-  return (
-    <div style={{ position: "absolute", left: pos, top: 0, height: "100%", transform: "translateX(-50%)" }}>
-      <div style={{ width: 2, height: "100%", background: color }} />
-      <div style={{ position: "absolute", [top ? "bottom" : "top"]: top ? 20 : 20, left: "50%", transform: "translateX(-50%)", whiteSpace: "nowrap", fontSize: 10.5, color, fontWeight: 600 }}>
-        {label}
       </div>
     </div>
   );
 }
 
-/* ================================================================ SETTINGS */
-function SettingsView({ settings, setSettings, clearAll, count }) {
+/* ============================================================ DETAIL SHEET */
+function DetailSheet({ entry, units, onClose, onDelete, onDuplicate }) {
+  const c = CATS[entry.cat]; const Icon = c.icon; const u = unitOf(entry.cat, entry.type);
+  return (
+    <div className="scrim" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-h">
+          <div style={{ fontWeight: 700, fontSize: 18 }}>Activity details</div>
+          <button className="iconbtn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 18 }}>
+          <span className="icwrap" style={{ background: c.color, width: 46, height: 46, borderRadius: 12 }}><Icon size={22} color="#fff" /></span>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>{FACTORS[entry.cat][entry.type].label}</div>
+            <CatTag cat={entry.cat} />
+          </div>
+        </div>
+        {[
+          ["Date", parseYMD(entry.date).toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })],
+          ["Amount", `${entry.amount.toLocaleString()} ${u}`],
+          ["Emission factor", `${factorOf(entry.cat, entry.type)} kg CO₂e / ${u}`],
+          ["Estimated impact", `${fmt(entry.co2, units)} ${unitLabel(units)}`],
+        ].map(([k, v]) => (
+          <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "11px 0", borderTop: "1px solid var(--line-2)", fontSize: 14 }}>
+            <span style={{ color: "var(--sub)" }}>{k}</span><span className="num" style={{ fontWeight: 600, textAlign: "right" }}>{v}</span>
+          </div>
+        ))}
+        <div style={{ fontSize: 12, color: "var(--sub)", marginTop: 14, padding: "10px 12px", background: "var(--line-2)", borderRadius: 10 }}>
+          <Info size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+          Estimate = amount × emission factor. Factors are averages from DEFRA / EPA / Our World in Data and are directional, not exact.
+        </div>
+        <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+          <button className="btn" style={{ flex: 1 }} onClick={() => onDuplicate(entry)}>Duplicate to today</button>
+          <button className="btn danger" onClick={() => onDelete(entry.id)}><Trash2 size={15} /> Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================ SETTINGS */
+function SettingsView({ settings, setSettings, entries, loadSample, clearAll }) {
   const [confirm, setConfirm] = useState(false);
+  const set = (patch) => setSettings((s) => ({ ...s, ...patch }));
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <Card style={{ padding: 20 }}>
-        <Eyebrow>Your details</Eyebrow>
-        <label style={{ ...lbl, marginTop: 14 }}>Name (optional)</label>
-        <input value={settings.name} placeholder="What should we call you?"
-          onChange={(e) => setSettings((s) => ({ ...s, name: e.target.value }))} style={input} />
+    <div className="grid" style={{ maxWidth: 620 }}>
+      <Card className="pad">
+        <div className="eyebrow">Profile</div>
+        <label className="lbl" style={{ marginTop: 14 }}>Name (optional)</label>
+        <input className="input" value={settings.name} placeholder="What should we call you?" onChange={(e) => set({ name: e.target.value })} />
 
-        <label style={{ ...lbl, marginTop: 18 }}>
-          Daily carbon budget · <strong style={{ color: C.brand }}>{settings.target} kg CO₂e</strong>
-        </label>
-        <input type="range" min="3" max="25" step="0.5" value={settings.target}
-          onChange={(e) => setSettings((s) => ({ ...s, target: parseFloat(e.target.value) }))}
-          style={{ width: "100%", accentColor: C.brand, marginTop: 8 }} />
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.sub }}>
-          <span>3 (very low)</span><span>25 (high)</span>
+        <label className="lbl" style={{ marginTop: 16 }}>Units</label>
+        <div className="seg">
+          <button className={settings.units === "kg" ? "on" : ""} onClick={() => set({ units: "kg" })}>Kilograms</button>
+          <button className={settings.units === "t" ? "on" : ""} onClick={() => set({ units: "t" })}>Tonnes</button>
         </div>
-        <p style={{ fontSize: 12.5, color: C.sub, marginTop: 12, lineHeight: 1.55, padding: "10px 12px", background: C.bg, borderRadius: 10 }}>
-          The long-term sustainable target is about <strong>5.5 kg/day</strong> (~2 tonnes a year). Many people start far higher — set a budget you can actually beat, then ratchet it down.
+
+        <label className="lbl" style={{ marginTop: 16 }}>Default date range</label>
+        <select className="select" value={settings.defaultRange} onChange={(e) => set({ defaultRange: e.target.value })}>
+          {RANGES.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+        </select>
+      </Card>
+
+      <Card className="pad">
+        <div className="eyebrow">Carbon budget</div>
+        <label className="lbl" style={{ marginTop: 14 }}>Monthly budget · <b style={{ color: "var(--brand)" }}>{settings.monthlyBudget} kg CO₂e</b></label>
+        <input type="range" min="50" max="800" step="10" value={settings.monthlyBudget} onChange={(e) => set({ monthlyBudget: parseInt(e.target.value) })}
+          style={{ width: "100%", accentColor: "var(--brand)" }} />
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--sub)" }}><span>50</span><span>800</span></div>
+        <p style={{ fontSize: 12.5, color: "var(--sub)", marginTop: 12, lineHeight: 1.5, padding: "10px 12px", background: "var(--bg)", borderRadius: 10 }}>
+          A long-term sustainable footprint is roughly <b>165 kg/month</b> (~2 tonnes a year). Pick a budget you can realistically beat, then lower it over time.
         </p>
       </Card>
 
-      <Card style={{ padding: 20 }}>
-        <Eyebrow>Your data</Eyebrow>
-        <p style={{ fontSize: 13.5, color: C.sub, margin: "10px 0 14px", lineHeight: 1.5 }}>
-          {count} {count === 1 ? "entry" : "entries"} saved on this device. Nothing leaves it.
+      <Card className="pad">
+        <div className="eyebrow">Your data</div>
+        <p style={{ fontSize: 13.5, color: "var(--sub)", margin: "10px 0 14px" }}>
+          {entries.length} {entries.length === 1 ? "entry" : "entries"} stored on this device. Nothing is uploaded.
         </p>
-        {!confirm ? (
-          <button onClick={() => setConfirm(true)} style={{ ...ghostBtn, color: C.warn, borderColor: C.warnSoft }}>
-            <Trash2 size={15} /> Clear all entries
-          </button>
-        ) : (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <span style={{ fontSize: 13.5, color: C.warn, fontWeight: 600 }}>Delete everything? This can’t be undone.</span>
-            <button onClick={() => { clearAll(); setConfirm(false); }} style={{ ...primaryBtn, background: C.warn }}>Yes, clear</button>
-            <button onClick={() => setConfirm(false)} style={ghostBtn}>Cancel</button>
-          </div>
-        )}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button className="btn" onClick={() => exportCSV(entries)} disabled={!entries.length}><Download size={15} /> Export CSV</button>
+          <button className="btn" onClick={loadSample}><Sparkles size={15} /> Load sample data</button>
+          {!confirm
+            ? <button className="btn danger" onClick={() => setConfirm(true)} disabled={!entries.length}><Trash2 size={15} /> Delete all</button>
+            : <>
+                <button className="btn danger" onClick={() => { clearAll(); setConfirm(false); }}>Confirm delete</button>
+                <button className="btn" onClick={() => setConfirm(false)}>Cancel</button>
+              </>}
+        </div>
       </Card>
     </div>
   );
 }
 
-/* ================================================================ shared: recent ledger list */
-function RecentLedger({ entries, onDelete, limit = 6, title = "Ledger" }) {
-  const rows = entries.slice(0, limit);
-  if (rows.length === 0) return null;
+/* ============================================================ ABOUT / METHODOLOGY */
+function About() {
   return (
-    <Card style={{ padding: 6 }}>
-      <div style={{ padding: "12px 14px 8px" }}><Eyebrow>{title}</Eyebrow></div>
-      {rows.map((e) => {
-        const c = CATS[e.cat];
-        return (
-          <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderTop: `1px solid ${C.bg}` }}>
-            <span style={{ width: 30, height: 30, borderRadius: 8, background: c.color, display: "grid", placeItems: "center", flexShrink: 0 }}>
-              <c.icon size={16} color="#fff" />
-            </span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {FACTORS[e.cat]?.[e.type]?.label || e.type}
-              </div>
-              <div style={{ fontSize: 11.5, color: C.sub }}>
-                {e.amount} {c.unit} · {dayKeyToDate(e.date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-              </div>
-            </div>
-            <span style={{ fontSize: 14, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmt(entryCO2(e))} kg</span>
-            <button onClick={() => onDelete(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: C.sub, padding: 4, display: "grid", placeItems: "center" }} title="Remove">
-              <Trash2 size={15} />
-            </button>
-          </div>
-        );
-      })}
-    </Card>
+    <div className="grid" style={{ maxWidth: 720 }}>
+      <Card className="pad">
+        <div className="eyebrow">About</div>
+        <h3 style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-.01em", margin: "10px 0 8px" }}>Carbon accounting you can actually see.</h3>
+        <p style={{ color: "var(--ink-2)", fontSize: 14.5, lineHeight: 1.6, margin: 0 }}>
+          Cinder turns everyday actions — a commute, a meal, a flight, a purchase — into an estimate of the greenhouse gases they cause, measured in kilograms of CO₂-equivalent (CO₂e). The goal is clarity, not guilt: see where your impact comes from, and find the few changes that matter most.
+        </p>
+      </Card>
+
+      <Card className="pad">
+        <div className="eyebrow">How estimates work</div>
+        <p style={{ color: "var(--ink-2)", fontSize: 14, lineHeight: 1.6 }}>
+          Each activity is multiplied by an <b>emission factor</b> — the average CO₂e per kilometre, kWh, meal, item, or dollar. Factors are drawn from the UK DEFRA 2024 conversion factors, the US EPA, and Our World in Data. They're population averages, so treat results as directional rather than a certified inventory. Electricity is especially location-dependent; the default grid factor is a moderate global value of 0.41 kg/kWh.
+        </p>
+      </Card>
+
+      <Card className="pad" style={{ overflowX: "auto" }}>
+        <div className="eyebrow">Emission factors used</div>
+        <table className="method" style={{ width: "100%", borderCollapse: "collapse", marginTop: 12 }}>
+          <thead><tr><th>Category</th><th>Activity</th><th>Factor</th></tr></thead>
+          <tbody>
+            {CAT_ORDER.map((k) => Object.keys(FACTORS[k]).map((t, i) => (
+              <tr key={k + t}>
+                <td>{i === 0 ? <CatTag cat={k} /> : ""}</td>
+                <td>{FACTORS[k][t].label}</td>
+                <td className="num">{FACTORS[k][t].f} kg CO₂e / {unitOf(k, t)}</td>
+              </tr>
+            )))}
+          </tbody>
+        </table>
+      </Card>
+
+      <Card className="pad">
+        <div className="eyebrow">Privacy</div>
+        <p style={{ color: "var(--ink-2)", fontSize: 14, lineHeight: 1.6, margin: 0 }}>
+          Your activities are stored locally in your browser and never sent to a server. You can export everything to CSV or delete it all at any time from Settings.
+        </p>
+      </Card>
+    </div>
   );
 }
-
-/* ---------------------------------------------------------------- inline style objects */
-const primaryBtn = {
-  display: "inline-flex", alignItems: "center", gap: 8, background: C.brand, color: "#fff",
-  border: "none", borderRadius: 10, padding: "11px 18px", fontSize: 14, fontWeight: 600,
-  cursor: "pointer", fontFamily: FONT_SANS,
-};
-const ghostBtn = {
-  display: "inline-flex", alignItems: "center", gap: 7, background: C.surface, color: C.sub,
-  border: `1px solid ${C.line}`, borderRadius: 10, padding: "9px 14px", fontSize: 13.5, fontWeight: 600,
-  cursor: "pointer", fontFamily: FONT_SANS,
-};
-const input = {
-  width: "100%", boxSizing: "border-box", padding: "10px 12px", borderRadius: 10,
-  border: `1px solid ${C.line}`, fontSize: 14, fontFamily: FONT_SANS, color: C.ink, background: C.surface, outline: "none",
-};
-const lbl = { display: "block", fontSize: 12, fontWeight: 600, color: C.sub, marginBottom: 6 };
