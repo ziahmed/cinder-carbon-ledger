@@ -4,8 +4,8 @@ A web app that tracks individual environmental impact and turns it into **action
 
 ## Submission links
 
-- **Source Code URL:** _replace with your repo, e.g._ `https://github.com/ziahmed/cinder-carbon-ledger`
-- **Live Application URL:** _replace with your deployment, e.g._ `https://cinder-carbon-ledger.vercel.app`
+- **Source Code URL:`https://github.com/ziahmed/cinder-carbon-ledger`
+- **Live Application URL:`https://cinder-carbon-ledger.vercel.app`
 
 ## Features
 
