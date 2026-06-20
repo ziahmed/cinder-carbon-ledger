@@ -7,7 +7,7 @@ import {
   Flame, LayoutDashboard, ReceiptText, Lightbulb, Settings as SettingsIcon,
   BookOpen, Plus, Trash2, X, ArrowUpRight, ArrowDownRight, Plane, Car, Zap,
   UtensilsCrossed, ShoppingBag, Shapes, Download, Search, Check, ArrowRight,
-  Target, TrendingUp, Info, Sparkles,
+  Target, TrendingUp, Info, Sparkles, Cloud, CloudOff, RefreshCw, LogOut,
 } from "lucide-react";
 
 /* ============================================================ storage
@@ -30,6 +30,111 @@ async function saveKey(key, val) {
     window.localStorage.setItem(key, JSON.stringify(val));
   } catch { /* keep in memory */ }
 }
+
+/* ============================================================ Google Drive sync (client-side, single user)
+   Auth uses Google Identity Services; data is one JSON file inside a "Cinder"
+   folder in the signed-in user's own Drive. Provide an OAuth Client ID below or
+   via VITE_GOOGLE_CLIENT_ID. Nothing runs unless it's set, so the app works offline. */
+const MANUAL_CLIENT_ID = "826004904345-n9kb15ib1uiuuq9m9tpgds487at9d4tb.apps.googleusercontent.com"; // Google OAuth Client ID (public; safe to commit). Or override with VITE_GOOGLE_CLIENT_ID.
+let ENV_CLIENT_ID = "";
+try { ENV_CLIENT_ID = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_GOOGLE_CLIENT_ID) || ""; } catch { ENV_CLIENT_ID = ""; }
+const GOOGLE_CLIENT_ID = MANUAL_CLIENT_ID || ENV_CLIENT_ID;
+const DRIVE_SCOPES = "openid email profile https://www.googleapis.com/auth/drive.file";
+const DRIVE_FOLDER = "Cinder";
+const DRIVE_FILE = "cinder-carbon-ledger.json";
+
+const driveConfigured = () => !!GOOGLE_CLIENT_ID;
+let _tokenClient = null, _token = null, _tokenExp = 0, _gis = null;
+const _lsGet = (k) => { try { return window.localStorage.getItem(k); } catch { return null; } };
+const _lsSet = (k, v) => { try { window.localStorage.setItem(k, v); } catch {} };
+const _lsDel = (k) => { try { window.localStorage.removeItem(k); } catch {} };
+
+function _loadScript(src) {
+  return new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) return res();
+    const s = document.createElement("script");
+    s.src = src; s.async = true; s.defer = true;
+    s.onload = () => res(); s.onerror = () => rej(new Error("Could not load Google sign-in"));
+    document.head.appendChild(s);
+  });
+}
+async function _ensureGis() {
+  if (!driveConfigured()) throw new Error("not-configured");
+  if (!_gis) _gis = (async () => {
+    await _loadScript("https://accounts.google.com/gsi/client");
+    for (let i = 0; i < 50 && !(window.google && window.google.accounts && window.google.accounts.oauth2); i++) await new Promise((r) => setTimeout(r, 100));
+    if (!(window.google && window.google.accounts && window.google.accounts.oauth2)) throw new Error("Google sign-in unavailable");
+    _tokenClient = window.google.accounts.oauth2.initTokenClient({ client_id: GOOGLE_CLIENT_ID, scope: DRIVE_SCOPES, callback: () => {} });
+  })();
+  return _gis;
+}
+function _requestToken(prompt) {
+  return new Promise((resolve, reject) => {
+    _ensureGis().then(() => {
+      _tokenClient.callback = (resp) => {
+        if (resp && resp.access_token) { _token = resp.access_token; _tokenExp = Date.now() + ((resp.expires_in ? resp.expires_in - 60 : 3000) * 1000); resolve(_token); }
+        else reject(new Error((resp && resp.error) || "auth-failed"));
+      };
+      _tokenClient.error_callback = (err) => reject(new Error((err && err.type) || "auth-failed"));
+      try { _tokenClient.requestAccessToken({ prompt }); } catch (e) { reject(e); }
+    }).catch(reject);
+  });
+}
+const driveSignedIn = () => !!_token && Date.now() < _tokenExp;
+async function _ensureToken() { if (driveSignedIn()) return _token; await _requestToken(""); return _token; }
+async function driveConnect() { await _requestToken(""); _lsSet("cinder:driveOn", "1"); return driveProfile(); }
+async function driveRestore() { if (_lsGet("cinder:driveOn") !== "1") return null; try { await _requestToken("none"); return driveProfile(); } catch { return null; } }
+function driveDisconnect() {
+  try { if (_token && window.google && window.google.accounts && window.google.accounts.oauth2) window.google.accounts.oauth2.revoke(_token, () => {}); } catch {}
+  _token = null; _tokenExp = 0; _lsDel("cinder:driveOn"); _lsDel("cinder:driveFileId"); _lsDel("cinder:driveFolderId");
+}
+async function _api(url, opts = {}) {
+  const t = await _ensureToken();
+  const res = await fetch(url, { ...opts, headers: { Authorization: `Bearer ${t}`, ...(opts.headers || {}) } });
+  if (res.status === 401) { _token = null; _tokenExp = 0; throw new Error("auth-expired"); }
+  if (!res.ok) throw new Error("drive-" + res.status);
+  return res;
+}
+async function driveProfile() { try { const r = await _api("https://www.googleapis.com/oauth2/v3/userinfo"); const j = await r.json(); return { email: j.email, name: j.name }; } catch { return { email: null }; } }
+async function _folderId() {
+  let id = _lsGet("cinder:driveFolderId");
+  if (id) { try { await _api(`https://www.googleapis.com/drive/v3/files/${id}?fields=id`); return id; } catch { _lsDel("cinder:driveFolderId"); id = null; } }
+  const q = encodeURIComponent(`name='${DRIVE_FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const r = await _api(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)`);
+  const j = await r.json();
+  if (j.files && j.files.length) { _lsSet("cinder:driveFolderId", j.files[0].id); return j.files[0].id; }
+  const c = await _api("https://www.googleapis.com/drive/v3/files", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: DRIVE_FOLDER, mimeType: "application/vnd.google-apps.folder" }) });
+  const cj = await c.json(); _lsSet("cinder:driveFolderId", cj.id); return cj.id;
+}
+async function _fileId() {
+  let id = _lsGet("cinder:driveFileId");
+  if (id) { try { await _api(`https://www.googleapis.com/drive/v3/files/${id}?fields=id`); return id; } catch { _lsDel("cinder:driveFileId"); id = null; } }
+  const q = encodeURIComponent(`name='${DRIVE_FILE}' and trashed=false`);
+  const r = await _api(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,modifiedTime)`);
+  const j = await r.json();
+  if (j.files && j.files.length) { _lsSet("cinder:driveFileId", j.files[0].id); return j.files[0].id; }
+  return null;
+}
+async function driveLoad() {
+  const id = await _fileId();
+  if (!id) return null;
+  const r = await _api(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
+  try { return await r.json(); } catch { return null; }
+}
+async function driveSave(data) {
+  const payload = JSON.stringify(data);
+  let id = _lsGet("cinder:driveFileId");
+  if (id) { try { await _api(`https://www.googleapis.com/drive/v3/files/${id}?fields=id`); } catch { _lsDel("cinder:driveFileId"); id = null; } }
+  if (id) { await _api(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: payload }); return id; }
+  const folder = await _folderId();
+  const boundary = "cinder" + Math.random().toString(36).slice(2);
+  const meta = { name: DRIVE_FILE, mimeType: "application/json", parents: [folder] };
+  const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${boundary}--`;
+  const r = await _api(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`, { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
+  const j = await r.json(); _lsSet("cinder:driveFileId", j.id); return j.id;
+}
+const driveLU = () => Number(_lsGet("cinder:updatedAt") || 0);
+const driveSetLU = (v) => _lsSet("cinder:updatedAt", String(v));
 
 /* ============================================================ domain model */
 const CATS = {
@@ -331,7 +436,10 @@ a.link{color:var(--brand);font-weight:600;text-decoration:none;cursor:pointer;}
   .cols-4{grid-template-columns:1fr 1fr;}
   .sheet{width:100%;}
   .ledger .hide-sm{display:none;}
+  .btn .lbl{display:none;}
 }
+.spin{animation:spin 1s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
 `;
 
 /* ============================================================ small components */
@@ -368,6 +476,69 @@ function CatTag({ cat }) {
   return <span className="tag" style={{ background: c.color + "1A", color: c.color }}><span className="dot" style={{ background: c.color }} />{c.label}</span>;
 }
 
+function CloudChip({ cloud, onClick }) {
+  const map = {
+    on: { ic: Cloud, c: "var(--brand)", t: cloud.syncing ? "Syncing…" : "Synced" },
+    connecting: { ic: RefreshCw, c: "var(--sub)", t: "Connecting…" },
+    reconnect: { ic: CloudOff, c: "var(--warn)", t: "Reconnect" },
+    error: { ic: CloudOff, c: "var(--warn)", t: "Sync error" },
+    off: { ic: CloudOff, c: "var(--sub)", t: "Sync off" },
+  };
+  const s = map[cloud.status] || map.off;
+  const Ic = s.ic;
+  return (
+    <button className="btn" onClick={onClick} title="Cloud sync settings" style={{ padding: "8px 11px", color: s.c }}>
+      <Ic size={15} className={cloud.syncing || cloud.status === "connecting" ? "spin" : ""} /> <span className="lbl">{s.t}</span>
+    </button>
+  );
+}
+
+function CloudCard({ cloud, connectDrive, disconnectDrive, pushNow }) {
+  const configured = cloud.status !== "unconfigured";
+  return (
+    <Card className="pad">
+      <div className="eyebrow">Cloud sync · Google Drive</div>
+      {!configured ? (
+        <div style={{ marginTop: 12 }}>
+          <p style={{ fontSize: 13.5, color: "var(--sub)", margin: "0 0 10px", lineHeight: 1.55 }}>
+            Not set up yet. Add a Google OAuth Client ID to sign in and sync your ledger to a “Cinder” folder in your own Drive, across devices.
+          </p>
+          <ol style={{ fontSize: 13, color: "var(--ink-2)", margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
+            <li>Create an OAuth Client ID (Web application) in Google Cloud Console with the Drive API enabled.</li>
+            <li>Add your site and <code>http://localhost:5173</code> to Authorized JavaScript origins.</li>
+            <li>Set <code>VITE_GOOGLE_CLIENT_ID</code> (or paste it into <code>App.jsx</code>) and redeploy.</li>
+          </ol>
+        </div>
+      ) : cloud.status === "on" ? (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+            <span className="icwrap" style={{ background: "var(--brand-soft)" }}><Cloud size={17} color="var(--brand)" /></span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{cloud.syncing ? "Syncing…" : "Connected"}</div>
+              <div style={{ fontSize: 12.5, color: "var(--sub)" }}>{cloud.email || "Signed in"} · Drive › Cinder</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+            <button className="btn" onClick={pushNow}><RefreshCw size={15} /> Sync now</button>
+            <button className="btn danger" onClick={disconnectDrive}><LogOut size={15} /> Disconnect</button>
+          </div>
+          {cloud.error && <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 10 }}>Last sync issue: {cloud.error}</div>}
+        </div>
+      ) : (
+        <div style={{ marginTop: 12 }}>
+          <p style={{ fontSize: 13.5, color: "var(--sub)", margin: "0 0 12px" }}>
+            {cloud.status === "reconnect" ? "Your session expired — reconnect to keep syncing." : "Sign in with Google to back up and sync your ledger across devices."}
+          </p>
+          <button className="btn primary" onClick={connectDrive} disabled={cloud.status === "connecting"}>
+            <Cloud size={15} /> {cloud.status === "connecting" ? "Connecting…" : "Connect Google Drive"}
+          </button>
+          {cloud.error && <div style={{ fontSize: 12, color: "var(--warn)", marginTop: 10 }}>Couldn’t connect: {cloud.error}</div>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 /* ============================================================ APP */
 export default function App() {
   const [view, setView] = useState("dashboard");
@@ -378,7 +549,12 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [detail, setDetail] = useState(null);
+  const [cloud, setCloud] = useState({ status: driveConfigured() ? "off" : "unconfigured", email: null, syncing: false, error: null });
   const hydrated = useRef(false);
+  const applyingRemote = useRef(false);
+  const saveTimer = useRef(null);
+  const cloudStatus = useRef(cloud.status);
+  useEffect(() => { cloudStatus.current = cloud.status; }, [cloud.status]);
 
   useEffect(() => {
     (async () => {
@@ -394,6 +570,14 @@ export default function App() {
       setEntered(!!ent);
       setLoading(false);
       hydrated.current = true;
+      if (driveConfigured()) {
+        const localEntries = Array.isArray(e) ? e : [];
+        const prof = await driveRestore();
+        if (prof) {
+          setCloud({ status: "on", email: prof.email, syncing: false, error: null });
+          try { await reconcile(localEntries, merged); } catch (err) { setCloud((c) => ({ ...c, error: String(err.message || err) })); }
+        }
+      }
     })();
   }, []);
   useEffect(() => { if (hydrated.current) saveKey(KEYS.entries, entries); }, [entries]);
@@ -410,6 +594,54 @@ export default function App() {
   const duplicateEntry = (e) => { setEntries((p) => [mkEntry(e.cat, e.type, e.amount, ymd(new Date())), ...p]); setDetail(null); };
   const loadSample = () => { setEntries(sampleEntries()); setEntered(true); setView("dashboard"); };
   const enterApp = () => { setEntered(true); setView("dashboard"); };
+
+  async function reconcile(localEntries, localSettings) {
+    let remote = null;
+    try { remote = await driveLoad(); }
+    catch (e) { if (e.message === "auth-expired") setCloud((c) => ({ ...c, status: "reconnect" })); throw e; }
+    const localLU = driveLU();
+    if (remote && Array.isArray(remote.entries) && remote.entries.length) {
+      const remoteLU = remote.updatedAt || 0;
+      if (localEntries.length === 0 || remoteLU >= localLU) {
+        applyingRemote.current = true;
+        setEntries(remote.entries);
+        if (remote.settings) setSettings((s) => ({ ...s, ...remote.settings }));
+        driveSetLU(remoteLU);
+        return;
+      }
+    }
+    const u = Date.now();
+    await driveSave({ entries: localEntries, settings: localSettings, updatedAt: u });
+    driveSetLU(u);
+  }
+  const connectDrive = async () => {
+    setCloud((c) => ({ ...c, status: "connecting", error: null }));
+    try {
+      const prof = await driveConnect();
+      setCloud({ status: "on", email: prof.email, syncing: false, error: null });
+      await reconcile(entries, settings);
+    } catch (e) {
+      setCloud({ status: driveConfigured() ? "off" : "unconfigured", email: null, syncing: false, error: String(e.message || e) });
+    }
+  };
+  const disconnectDrive = () => { driveDisconnect(); setCloud({ status: "off", email: null, syncing: false, error: null }); };
+  const pushNow = async () => {
+    setCloud((c) => ({ ...c, syncing: true }));
+    try { const u = Date.now(); await driveSave({ entries, settings, updatedAt: u }); driveSetLU(u); setCloud((c) => ({ ...c, syncing: false, error: null, status: "on" })); }
+    catch (e) { setCloud((c) => ({ ...c, syncing: false, error: String(e.message || e), status: e.message === "auth-expired" ? "reconnect" : c.status })); }
+  };
+
+  // debounced push to Drive whenever data changes while connected
+  useEffect(() => {
+    if (!hydrated.current || cloudStatus.current !== "on") return;
+    if (applyingRemote.current) { applyingRemote.current = false; return; }
+    clearTimeout(saveTimer.current);
+    setCloud((c) => ({ ...c, syncing: true }));
+    saveTimer.current = setTimeout(async () => {
+      try { const u = Date.now(); await driveSave({ entries, settings, updatedAt: u }); driveSetLU(u); setCloud((c) => ({ ...c, syncing: false, error: null })); }
+      catch (e) { setCloud((c) => ({ ...c, syncing: false, error: String(e.message || e), status: e.message === "auth-expired" ? "reconnect" : c.status })); }
+    }, 1500);
+  }, [entries, settings]);
 
   const units = settings.units;
 
@@ -432,7 +664,7 @@ export default function App() {
   if (!entered) {
     return (
       <div className="cinder"><style>{CSS}</style>
-        <Landing onEnter={enterApp} onSample={loadSample} onAbout={() => { setEntered(true); setView("about"); }} />
+        <Landing onEnter={enterApp} onSample={loadSample} onAbout={() => { setEntered(true); setView("about"); }} cloud={cloud} onSignIn={async () => { await connectDrive(); setEntered(true); setView("dashboard"); }} />
       </div>
     );
   }
@@ -445,7 +677,10 @@ export default function App() {
             <div className="mark"><Flame size={19} color="#fff" strokeWidth={2.2} /></div>
             <div><h1>Cinder</h1><p>carbon ledger</p></div>
           </div>
-          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={16} /> Add activity</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {driveConfigured() && <CloudChip cloud={cloud} onClick={() => setView("settings")} />}
+            <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={16} /> Add activity</button>
+          </div>
         </header>
 
         <div className="tabwrap">
@@ -465,7 +700,7 @@ export default function App() {
           {view === "dashboard" && <Dashboard {...{ entries, range, setRange, units, settings, setView, setAddOpen, setDetail }} />}
           {view === "activities" && <Activities {...{ entries, units, setAddOpen, setDetail }} />}
           {view === "insights" && <Insights {...{ entries, range, setRange, units, settings, setAddOpen }} />}
-          {view === "settings" && <SettingsView {...{ settings, setSettings, entries, loadSample, clearAll: () => setEntries([]) }} />}
+          {view === "settings" && <SettingsView {...{ settings, setSettings, entries, loadSample, clearAll: () => setEntries([]), cloud, connectDrive, disconnectDrive, pushNow }} />}
           {view === "about" && <About />}
         </main>
 
@@ -482,7 +717,7 @@ export default function App() {
 }
 
 /* ============================================================ LANDING */
-function Landing({ onEnter, onSample, onAbout }) {
+function Landing({ onEnter, onSample, onAbout, cloud, onSignIn }) {
   return (
     <div className="wrap">
       <header className="hdr">
@@ -500,6 +735,9 @@ function Landing({ onEnter, onSample, onAbout }) {
           <div className="cta-row">
             <button className="btn primary lg" onClick={onEnter}>Open the ledger <ArrowRight size={17} /></button>
             <button className="btn lg" onClick={onSample}><Sparkles size={16} /> View sample data</button>
+            {cloud && cloud.status !== "unconfigured" && (
+              <button className="btn lg" onClick={onSignIn}><Cloud size={16} /> Sign in with Google</button>
+            )}
           </div>
           <div className="trust">
             <span><Check size={14} color="var(--brand)" /> Private by default</span>
@@ -1013,11 +1251,12 @@ function DetailSheet({ entry, units, onClose, onDelete, onDuplicate }) {
 }
 
 /* ============================================================ SETTINGS */
-function SettingsView({ settings, setSettings, entries, loadSample, clearAll }) {
+function SettingsView({ settings, setSettings, entries, loadSample, clearAll, cloud, connectDrive, disconnectDrive, pushNow }) {
   const [confirm, setConfirm] = useState(false);
   const set = (patch) => setSettings((s) => ({ ...s, ...patch }));
   return (
     <div className="grid" style={{ maxWidth: 620 }}>
+      <CloudCard cloud={cloud} connectDrive={connectDrive} disconnectDrive={disconnectDrive} pushNow={pushNow} />
       <Card className="pad">
         <div className="eyebrow">Profile</div>
         <label className="lbl" style={{ marginTop: 14 }}>Name (optional)</label>
